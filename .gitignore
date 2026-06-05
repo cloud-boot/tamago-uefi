@@ -1,0 +1,8 @@
+# build artifacts
+app.elf
+*.efi
+*.EFI
+esp.img
+vars.fd
+startup.nsh
+*.log
