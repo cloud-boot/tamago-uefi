@@ -15,19 +15,44 @@ proves firmware entry, runtime bring-up and console on the real Go runtime
 ## Status
 
 | arch | toolchain PIE | board files | builds | image loads | runtime bring-up | hello |
-|---|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- | --- |
 | **amd64** | ✅ | ✅ | ✅ | ✅ (OVMF q35) | ✅ | **✅** |
-| **arm64** | ✅ | ✅ | ✅ | ✅ (AAVMF virt) | ⚠️ hangs silently in Go runtime between cpuinit and `Hwinit1` | ❌ |
+| **arm64** | ✅ | ✅ | ✅ | ✅ (AAVMF virt) | ⚠️ fault in `schedinit` (see below) | ❌ |
 
 The arm64 leg's `cpuinit` shim runs to completion (verified with serial
-markers on the QEMU virt PL011) and the firmware loads/starts the image,
-but the standard Go runtime arm64 bring-up
-(`g0`/`m0` → `check` → `osinit` → `schedinit`) hangs silently in our UEFI
-EL1 context. Likely candidates not yet ruled out: a missing
-exception-vector wiring, a `CPACR_EL1.FPEN` edge case, or a PIE
-relocation specific to arm64 that `peln.LinkPIE` mis-applies. Treat
-arm64 as Phase 1.5; the toolchain, packaging and entry shim are all in
-place — only the runtime bring-up needs deeper debugging.
+markers on the QEMU virt PL011) and the firmware loads/starts the image.
+A focused debug pass — temporary PL011 marker writes after each `BL` in
+`sys_tamago_arm64.s` plus markers around `goos.Hwinit0()` in
+`runtime.hwinit0` — pinned the bring-up failure down to two distinct
+issues:
+
+1. **Framework `arm64.Init()` is incompatible with UEFI.** Despite being
+   named `Init()` (and exposed as `runtime/goos.Hwinit0` via linkname),
+   the framework function calls `cpu.InitMMU()`, which builds new EL1
+   page tables on the bare-metal assumption that "all memory is mapped as
+   device memory at start". Under UEFI the firmware has already
+   identity-mapped RAM (Normal/Cacheable) + MMIO (Device) — rebuilding
+   the MMU clobbers those mappings and the bring-up never returns.
+   Worked around by patching the local clone of
+   `github.com/usbarmory/tamago/arm64/init.go` to skip the `InitMMU()`
+   call. **TODO upstream**: gate it behind a build tag (e.g.
+   `!linkhwinit0`, mirroring `!linkcpuinit`/`!linkramstart`) so consumers
+   like `tamago-uefi` can opt out without forking the framework.
+
+2. **`runtime.schedinit` triggers a permission fault.** With (1) worked
+   around, the runtime progresses through `hwinit0` → `check` →
+   `osinit` and faults inside `schedinit`: ESR=`0x9600004F`
+   (EC 0x25, ISS 0x4F = *Data abort: Permission fault, third level*) at
+   FAR=`0x13C69D000`. The faulting address sits in a page the UEFI
+   image-protection policy mapped read-only (likely an image data region
+   that EDK2 marks RO at load time); the runtime tries to write there
+   during scheduler init. Closing this needs either a UEFI-aware MMU
+   re-map (analogue of `InitMMU()` that preserves firmware's MMIO
+   mappings) or an image-protection-policy adjustment.
+
+Treat arm64 as Phase 1.5; the toolchain, packaging and entry shim are all
+in place. Closing the remaining schedinit perm-fault is the last
+blocker, and it's bounded — single page, single PC, well-characterised.
 
 ## Our own UEFI board (`uefiboard/`)
 
@@ -84,7 +109,7 @@ qemu-system-aarch64 -machine virt -cpu max -m 4096 -nographic \
 
 amd64 expected output:
 
-```
+```text
 hello from cloud-boot tamago/amd64 UEFI board
 runtime: go1.26.3 GOOS=tamago GOARCH=amd64
 goroutine sum: 499500
