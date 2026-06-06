@@ -94,6 +94,85 @@ pieces are nonetheless in place and validated end-to-end (PIE PE32+
 with relocations matches the amd64/arm64 shape exactly), so a fresher
 EDK2 build is expected to unblock at least image entry.
 
+The **loong64** leg is the highest-risk one because the upstream port
+is itself still in flight: `usbarmory/tamago-go#17` (toolchain
+instruction-set wireup, PIE-free) is still open and the framework
+proposal `usbarmory/tamago#70` is design-only — there is no
+`usbarmory/tamago/loong64/` directory upstream yet. Both pieces are
+staged locally:
+
+- the tamago-go fork patch (`cloud-boot/docs/tamago-loong64-fork.patch`)
+  plus the cloud-boot-local PIE overlay
+  (`cloud-boot/docs/tamago-loong64-pie.patch`) on top of
+  `~/Documents/VCS/GIT/localhost/tamago-pie/`, and
+- a local `usbarmory/tamago/loong64/` package + `goos/goos_loong64.s`
+  trampoline mirroring the riscv64 / arm64 shape (`loong64.go`,
+  `loong64.s`, `init.{go,s}`, `timer.{go,s}`, `rng.go`, `exception.{go,s}`).
+
+These local additions are NOT pushed upstream. Track upstream:
+[`usbarmory/tamago-go#17`](https://github.com/usbarmory/tamago-go/pull/17),
+[`usbarmory/tamago#70`](https://github.com/usbarmory/tamago/issues/70).
+
+The bring-up status is the same Phase-1.5 shape as arm64:
+
+1. **Toolchain + PE wrapping work end-to-end.** A 1.6 MB TamaGo
+   loong64 PIE (`ET_DYN`, 3832 `R_LARCH_RELATIVE` relocs) round-trips
+   through `pectl link-pie` to a 1.1 MB `BOOTLOONGARCH64.EFI`
+   (PE32+, machine `0x6264`, subsystem 10, 3844 `IMAGE_REL_BASED_DIR64`
+   base relocs). EDK2 LoongArch under QEMU `virt -cpu max -m 4096`
+   loads the image and transfers control to our `cpuinit`.
+
+2. **`cpuinit` runs end-to-end** — verified by an `'A'` marker written
+   to the QEMU virt ns16550a UART (`THR @ 0x1FE001E0`) at the very top
+   of `cpuinit_loong64.s`. ImageHandle, SystemTable, ConOut are
+   captured; `RamStart = &runtime.text + 2 MiB`; `R3` (SP) = top of RAM
+   minus the stack window; tail-call to `_rt0_tamago_start`.
+
+3. **`csrwr R19, EUEN` aborts boot.** An explicit re-arm of
+   `CSR.EUEN.FPE` (instruction `0x04000833`) at the end of `cpuinit`
+   throws a fatal `ESTAT.Ecode=0x0D` (*Instruction Non-Defined*)
+   exception under EDK2 LoongArch — `ERA=0`, firmware prints
+   "Can't find image information" and halts. Empirically the firmware
+   leaves the FPU **on** for us, so the workaround is to simply omit
+   the csrwr (same shape as the arm64 SCTLR/CPACR skip). Documented in
+   the file header.
+
+4. **Silent hang past `cpuinit`.** With the EUEN write removed, the
+   PE entry runs to completion and `JMP _rt0_tamago_start` transfers
+   control to the runtime. From there the UART falls silent (the
+   runtime uses ConOut, not UART, so without progress we get nothing
+   on either) until QEMU is terminated. This matches the arm64
+   Phase-1.5 shape: the runtime is reached and bring-up gets at least
+   partway through `hwinit0` / `check` / `osinit` / `schedinit`, but
+   never produces a `println` byte through ConOut. The arm64 root
+   cause was a UEFI image-protection .reloc page-permission fault in
+   `schedinit`; the loong64 leg almost certainly hits the same kind of
+   issue (the `RamStart = text + 2 MiB` workaround the arm64 leg uses
+   for that is already applied here as a preemptive measure, but a
+   second-order .reloc page in a different layout could still bite).
+
+Closing this needs the same kind of focused debug pass arm64 needs:
+PL011/UART marker writes after each `JAL` in `sys_tamago_loong64.s`
+plus markers around `goos.Hwinit0()` in `runtime.hwinit0`, and likely
+also a real `exception.s` that catches the bring-up fault on the
+LoongArch side instead of letting EDK2's firmware vectors silently
+eat it.
+
+### Upstream PRs that would close gaps
+
+- `usbarmory/tamago-go#17` — merge the loong64 toolchain port (already
+  open). Cloud-boot's PIE overlay is intentionally kept out of that PR.
+- `usbarmory/tamago#70` — open the `usbarmory/tamago/loong64/` package
+  upstream once the design discussion concludes; cloud-boot's local
+  files (`loong64.{go,s}`, `init.{go,s}`, `timer.{go,s}`, `rng.go`,
+  `exception.{go,s}`) are ready to seed that PR.
+- A small `peln` improvement (track in
+  [`go-coff/peln`](https://github.com/go-coff/peln)) to surface load-bias
+  diagnostics on `loongarch64` would have shortened our debug.
+- A framework-side `!linkhwinit0` build tag (or equivalent) gating
+  `arm64.Init()`'s `InitMMU()` call — same TODO already noted for
+  arm64, applies equally to loong64.
+
 ## Our own UEFI board (`uefiboard/`)
 
 We reuse the TamaGo framework's per-arch CPU package (timer,
@@ -114,6 +193,9 @@ arch-neutral core plus per-arch entry shims and Go hooks.
 | `eficall_riscv64.s` | LP64 thunk: `A0..A3` args, no shadow space, indirect `JALR (T1)` | riscv64 |
 | `board_riscv64.go` | self-contained (no framework dep), `Nanotime` via `rdtime` (TIME CSR), `Hwinit0/1` no-ops under UEFI, `RamSize=32 MiB`, `RamStackOffset`, xorshift RNG stubs | riscv64 |
 | `board_riscv64.s` | `rdtime()` via raw `csrrs t0, time, zero` (`WORD $0xc01022f3`) | riscv64 |
+| `cpuinit_loong64.s` | PE entry (LoongArch LP64: `R4`=ImageHandle, `R5`=SystemTable), early `'A'` UART marker, RamStart, hand-off to `_rt0_tamago_start`. FPU csrwr deliberately omitted (firmware leaves EUEN.FPE set; an explicit re-arm throws INE) | loong64 |
+| `eficall_loong64.s` | LoongArch LP64 thunk: `R4..R7` args, no shadow space, indirect `JAL (R13)` via `R23`-stashed RA | loong64 |
+| `board_loong64.go` | `CPU = &loong64.CPU{}`, `Nanotime` via stable-timer, `Hwinit1 = CPU.InitTimer()` only (skip framework `CPU.Init()` for the UEFI/firmware-vector reasons), `RamSize=64 MiB`, `RamStackOffset`, RNG via the framework's stable-timer-seeded splitmix64 | loong64 |
 
 Built with `-tags linkcpuinit,linkramstart`: these exclude the framework's
 bare-metal `cpuinit` (so ours wins) and, on amd64, the framework's
@@ -163,6 +245,13 @@ qemu-system-riscv64 -machine virt -m 4096 -nographic \
   -drive if=pflash,format=raw,unit=1,file=edk2-riscv-vars.fd \
   -drive file=fat:rw:esp-riscv64,format=raw,if=none,id=esp \
   -device virtio-blk-device,drive=esp
+
+# 4'''. boot under QEMU/EDK2-LoongArch (loong64) — image loads + runs
+# cpuinit (UART 'A' marker fires), runtime then hangs silently (see Status)
+qemu-system-loongarch64 -machine virt -cpu max -m 4096 -nographic \
+  -bios edk2-loongarch64-code.fd \
+  -drive format=raw,file=boot-loong64.iso,if=none,id=cd \
+  -device virtio-blk-pci,drive=cd
 ```
 
 amd64 expected output:
@@ -181,11 +270,15 @@ DONE
   `edk2-riscv` snapshot (current pkgx pin is `edk2-stable202408`, which
   reproduces the `SetUefiImageMemoryAttributes` fault) or by booting
   through systemd-stub on a kernel rather than as a bare EFI app.
+- Finish loong64 runtime bring-up: same `JAL`/Hwinit0 marker pass arm64
+  needs, plus upstreaming the local `usbarmory/tamago/loong64/` package
+  (cf. `usbarmory/tamago#70`) and the toolchain port
+  (cf. `usbarmory/tamago-go#17`). The cloud-boot-local PIE overlay
+  (`tamago-loong64-pie.patch`) stays out of the upstream PR per the
+  maintainer's request — track it here.
 - Reconcile `RamSize` against the UEFI memory map post-World
   (`GetMemoryMap` + `AllocatePages`) instead of the per-arch hardcoded
   bound; same approach go-boot uses on amd64.
-- Add the loong64 leg once arm64/riscv64 stabilise (toolchain PIE +
-  `peln` already cover the machine code).
 - `go.mod` uses a local `replace` for the TamaGo framework during
   development.
 

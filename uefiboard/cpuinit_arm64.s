@@ -20,14 +20,19 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MOVD	64(R1), R2
 	MOVD	R2, ·conOut(SB)
 
-	// RamStart = &runtime.text - 64 KiB. Deriving it from the actual
-	// loaded text VA keeps us tolerant to wherever firmware placed the
-	// image. The 64 KiB literal goes via a register because AArch64's
-	// SUB-immediate form is 12-bit (with optional left-shift by 12),
-	// and assemblers vary on auto-encoding the shifted form.
+	// RamStart = &runtime.text + 2 MiB. The runtime's heap arena lives in
+	// [RamStart, RamStart+RamSize] and only avoids the .text / .data
+	// ranges via TextRegion/DataRegion — it does NOT know about the PE
+	// .reloc section, which UEFI image-protection on AArch64 maps as
+	// read-only. With the amd64 trick of RamStart=text-64KiB the heap
+	// then partially overlaps .reloc, and the first scheduler write that
+	// lands there takes an L3 permission fault. Starting RamStart past
+	// the whole image (text + ~1.6 MiB image span, rounded up to 2 MiB
+	// for headroom on bigger builds) keeps the heap on plain firmware
+	// RAM (writable Normal-cacheable) and side-steps it entirely.
 	MOVD	$runtime·text(SB), R3
-	MOVD	$0x10000, R4
-	SUB	R4, R3, R3
+	MOVD	$0x200000, R4
+	ADD	R4, R3, R3
 	MOVD	R3, runtime∕goos·RamStart(SB)
 
 	// SP = RamStart + RamSize - RamStackOffset (top of RAM minus the
