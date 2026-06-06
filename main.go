@@ -11,7 +11,7 @@ package main
 import (
 	"runtime"
 
-	_ "github.com/cloud-boot/tamago-amd64-uefi/uefiboard"
+	_ "github.com/cloud-boot/tamago-uefi/uefiboard"
 )
 
 func main() {

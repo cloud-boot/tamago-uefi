@@ -1,4 +1,4 @@
-module github.com/cloud-boot/tamago-amd64-uefi
+module github.com/cloud-boot/tamago-uefi
 
 go 1.26.3
 

@@ -1,7 +1,9 @@
 # build artifacts
 app.elf
+app_*.elf
 *.efi
 *.EFI
+*.iso
 esp.img
 vars.fd
 startup.nsh
