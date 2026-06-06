@@ -39,12 +39,13 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	ADD	R1, RSP
 	SUB	R2, RSP
 
-	// Clear SCTLR_EL1.A (alignment-check enable): Go arm64 codegen
-	// occasionally emits unaligned accesses that would otherwise trap.
-	// Keep SCTLR_EL1.M (MMU) ON so the firmware's identity-mapped page
-	// tables continue to cover code/data/MMIO.
+	// Clear SCTLR_EL1.A (alignment check). Leave M (MMU enable) ON so the
+	// firmware's identity-mapped page tables continue to cover code/data
+	// and MMIO with the right memory attributes; turning the MMU off
+	// downgrades MMIO writes (e.g. the PL011 UART) to a default
+	// Normal-Non-cacheable type and they stop becoming visible.
 	MRS	SCTLR_EL1, R3
-	BIC	$1<<1, R3
+	BIC	$1<<1, R3	// A: alignment check
 	MSR	R3, SCTLR_EL1
 	WORD	$0xd5033fdf	// isb sy (Go arm64 asm rejects "ISB SY" without arm64.h macros)
 

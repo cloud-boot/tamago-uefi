@@ -41,9 +41,15 @@ func hwinit1() {
 	// vector table (initVectorTable writes VBAR_EL1) which would conflict
 	// with the firmware's vectors that we still depend on, and it sets
 	// goos.Idle to a WFI-based governor whose interrupts we haven't wired
-	// up. Empirically the runtime reaches this point only after a longer
-	// bring-up debug session (see README — arm64 is still Phase 1.5).
+	// up.
+	//
+	// Phase 1.5 note: empirically the runtime never reaches this point —
+	// it hangs silently in the standard arm64 bring-up between cpuinit and
+	// the schedinit/InitRNG call. See README "Status / Phase 1.5".
 }
+
+//go:linkname initRNG runtime/goos.InitRNG
+func initRNG() {}
 
 // Framework arm64 has no RamStackOffset linkname; declare it here. 1 MiB
 // stack window matches the amd64 default.
@@ -56,9 +62,6 @@ var ramStackOffset uint64 = 0x100000
 // deterministic xorshift adequate for a hello-world / boot path; a real
 // loader will want either ARMv8.5 RNDR or a virtio-rng source.
 var rngState uint64 = 0x9E3779B97F4A7C15
-
-//go:linkname initRNG runtime/goos.InitRNG
-func initRNG() {}
 
 //go:linkname getRandomData runtime/goos.GetRandomData
 func getRandomData(b []byte) {
