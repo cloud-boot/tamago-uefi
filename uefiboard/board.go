@@ -13,16 +13,16 @@
 // RamStart so ours win), and harmless on arm64 (whose framework package
 // doesn't ship those symbols at all).
 
-//go:build tamago && (amd64 || arm64)
+//go:build tamago && (amd64 || arm64 || loong64 || riscv64)
 
 package uefiboard
 
 import "unsafe"
 
 // UEFI handoff state, captured by the per-arch cpuinit shim from the
-// firmware entry registers (RCX/RDX on amd64, X0/X1 on arm64) and the
-// System Table. ConOut sits at offset 64 of EFI_SYSTEM_TABLE on every UEFI
-// platform.
+// firmware entry registers (RCX/RDX on amd64, X0/X1 on arm64, A0/A1 on
+// riscv64) and the System Table. ConOut sits at offset 64 of
+// EFI_SYSTEM_TABLE on every UEFI platform.
 var (
 	imageHandle uint64 // set in cpuinit_<arch>.s
 	systemTable uint64 // set in cpuinit_<arch>.s
@@ -51,8 +51,8 @@ const efiOutputString = 0x08
 
 // efiCall invokes a UEFI service through its function-pointer slot. The
 // implementation lives in eficall_<arch>.s and respects the platform's
-// UEFI calling convention (MS x64 on amd64, AAPCS64 on arm64). Returns
-// EFI_STATUS in the low 64 bits.
+// UEFI calling convention (MS x64 on amd64, AAPCS64 on arm64, LP64 on
+// riscv64). Returns EFI_STATUS in the low 64 bits.
 //
 //go:noescape
 func efiCall(fn, a0, a1, a2, a3 uint64) (status uint64)
