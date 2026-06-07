@@ -1,0 +1,141 @@
+version: '3'
+
+# Reproducible per-arch build pipeline for cloud-boot/tamago-uefi.
+#
+# Why a Taskfile (not a shell snippet in the README): the build pipeline
+# needs GOOS=tamago, GOOSPKG, the correct GOARCH, the right -tags and
+# -ldflags, AND the right toolchain ($TAMAGO/bin/go, not the host `go`).
+# Open-coding that in a shell each time is how `BOOTRISCV64.EFI` ended up
+# with `runtime.GOARCH=amd64` baked into rodata while the .text was
+# RISC-V machine code — the env wasn't reset between targets. Each task
+# below pins every env var explicitly so no stale value from a previous
+# `export` can leak in.
+#
+# Toolchain locations (overridable):
+#   TAMAGO   : path to tamago-go (defaults to ../../../localhost/tamago-pie)
+#   PECTL    : path to the pectl source dir (defaults to ../../go-coff/pectl)
+#
+# The default `pectl` invocation builds it on the fly via `go run` so the
+# binary needn't be installed.
+
+vars:
+  TAMAGO:
+    sh: |
+      if [ -n "$TAMAGO" ]; then echo "$TAMAGO";
+      else echo "{{.TASKFILE_DIR}}/../../../localhost/tamago-pie"; fi
+  PECTL_DIR:
+    sh: |
+      if [ -n "$PECTL_DIR" ]; then echo "$PECTL_DIR";
+      else echo "{{.TASKFILE_DIR}}/../../go-coff/pectl"; fi
+  GOOSPKG: github.com/usbarmory/tamago
+  BUILD_TAGS: linkcpuinit,linkramstart
+  LDFLAGS: -E cpuinit
+
+tasks:
+  default:
+    desc: List available tasks.
+    cmds:
+      - task --list-all
+    silent: true
+
+  check-toolchain:
+    desc: Verify the tamago-go toolchain and pectl source are reachable.
+    silent: true
+    cmds:
+      - 'test -x "{{.TAMAGO}}/bin/go" || (echo "tamago-go not found at {{.TAMAGO}}/bin/go (set TAMAGO=...)"; exit 1)'
+      - 'test -f "{{.PECTL_DIR}}/main.go" || (echo "pectl source not found at {{.PECTL_DIR}} (set PECTL_DIR=...)"; exit 1)'
+      - 'echo "toolchain ok: {{.TAMAGO}}/bin/go + {{.PECTL_DIR}}"'
+
+  elf:amd64:
+    desc: Build app_amd64.elf (TamaGo PIE, GOOS=tamago GOARCH=amd64).
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64.elf .'
+
+  elf:arm64:
+    desc: Build app_arm64.elf (TamaGo PIE, GOOS=tamago GOARCH=arm64).
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64.elf .'
+
+  elf:riscv64:
+    desc: Build app_riscv64.elf (TamaGo PIE, GOOS=tamago GOARCH=riscv64).
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64.elf .'
+
+  elf:loong64:
+    desc: Build app_loong64.elf (TamaGo PIE, GOOS=tamago GOARCH=loong64).
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64.elf .'
+
+  efi:amd64:
+    desc: Link BOOTX64.EFI from app_amd64.elf via pectl link-pie.
+    deps: [elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64.EFI" "{{.TASKFILE_DIR}}/app_amd64.elf"'
+
+  efi:arm64:
+    desc: Link BOOTAA64.EFI from app_arm64.elf via pectl link-pie.
+    deps: [elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64.EFI" "{{.TASKFILE_DIR}}/app_arm64.elf"'
+
+  efi:riscv64:
+    desc: Link BOOTRISCV64.EFI from app_riscv64.elf via pectl link-pie.
+    deps: [elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64.EFI" "{{.TASKFILE_DIR}}/app_riscv64.elf"'
+
+  efi:loong64:
+    desc: Link BOOTLOONGARCH64.EFI from app_loong64.elf via pectl link-pie.
+    deps: [elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64.EFI" "{{.TASKFILE_DIR}}/app_loong64.elf"'
+
+  all:
+    desc: Build all four EFIs (amd64, arm64, riscv64, loong64).
+    cmds:
+      - task: efi:amd64
+      - task: efi:arm64
+      - task: efi:riscv64
+      - task: efi:loong64
+
+  test:
+    desc: Run banner-rodata tests against the produced EFIs.
+    deps: [all]
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -v ./internal/bannertest/...
+
+  clean:
+    desc: Remove built ELFs and EFIs.
+    cmds:
+      - rm -f app.elf app_amd64.elf app_arm64.elf app_riscv64.elf app_loong64.elf
+      - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI

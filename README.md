@@ -18,7 +18,7 @@ proves firmware entry, runtime bring-up and console on the real Go runtime
 | --- | --- | --- | --- | --- | --- | --- |
 | **amd64** | ✅ | ✅ | ✅ | ✅ (OVMF q35) | ✅ | **✅** |
 | **arm64** | ✅ | ✅ | ✅ | ✅ (AAVMF virt) | ✅ | **✅** |
-| **riscv64** | ✅ | ✅ | ✅ | ✅ (EDK2 RiscVVirt) | ✅ | **✅** (banner mislabels arch — see below) |
+| **riscv64** | ✅ | ✅ | ✅ | ✅ (EDK2 RiscVVirt) | ✅ | **✅** |
 | **loong64** | ✅ | ✅ | ✅ | ✅ (EDK2 LoongArch virt) | ✅ | **✅** |
 
 All four legs reach the `main` hello print and the goroutine-channel
@@ -195,6 +195,17 @@ Requires the TamaGo `tamago-go` toolchain with the cloud-boot-local PIE
 overlay applied (see `cloud-boot/docs/tamago-loong64-pie.patch`), the
 TamaGo framework, and `go-coff/pectl`.
 
+The per-arch build pipeline is captured in `Taskfile.yaml` — `task all`
+builds the four EFIs in one shot, `task test` rebuilds them and asserts
+that `runtime.GOARCH` got constant-folded to the right value in each PE's
+rodata (regression guard for the now-fixed `BOOTRISCV64.EFI` banner that
+used to read `tamago/amd64` despite carrying RISC-V machine code — root
+cause was a stray host `GOARCH` leaking into the riscv64 invocation).
+Overridable env: `TAMAGO=...` for the `tamago-go` toolchain, `PECTL_DIR=...`
+for the `pectl` source dir.
+
+Equivalent shell pipeline, per arch:
+
 ```sh
 # 1. ELF (PIE) on the TamaGo runtime
 GOOS=tamago GOOSPKG=github.com/usbarmory/tamago GOARCH=<arch> \
@@ -233,22 +244,18 @@ qemu-system-loongarch64 -machine virt -cpu max -m 4096 -nographic \
   -device virtio-blk-pci,drive=cd
 ```
 
-amd64 expected output:
+Expected output (per arch — `<arch>` ∈ {`amd64`, `arm64`, `riscv64`,
+`loong64`}):
 
 ```text
-hello from cloud-boot tamago/amd64 UEFI board
-runtime: go1.26.3 GOOS=tamago GOARCH=amd64
+hello from cloud-boot tamago/<arch> UEFI board
+runtime: go1.26.3 GOOS=tamago GOARCH=<arch>
 goroutine sum: 499500
 DONE
 ```
 
 ## Follow-ups
 
-- Fix the riscv64 banner mislabel: `runtime.GOARCH` is baked as
-  `amd64` in the produced `BOOTRISCV64.EFI` rodata even though the PE
-  machine type and instructions are riscv64. Trace the build chain
-  (`GOOS=tamago GOARCH=riscv64` Go invocation → `pectl link-pie`) and
-  fix in the right layer.
 - Submit the `BaseRiscVMmuLib.c` `~`/`!` assert-typo patch (staged at
   `cloud-boot/docs/edk2-riscv64-protection-fix.patch`) to
   `devel@edk2.groups.io`.
