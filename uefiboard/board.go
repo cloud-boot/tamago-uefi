@@ -76,12 +76,34 @@ const efiOutputString = 0x08
 //go:noescape
 func efiCall(fn, a0, a1, a2, a3, a4 uint64) (status uint64)
 
+// BlkSink, when non-nil, receives a copy of every byte printk emits.
+// Used by the Phase-2 M1.6 Block IO side-channel probe to mirror
+// ConOut output into a virtio-blk scratch region so observers on a
+// hypervisor that doesn't expose ConOut (Apple VZ via vfkit 0.6.3 —
+// see R-M1'a) can recover the probe output post-halt.
+//
+// Default: nil = Phase-1 / M0 / M1 / M1.5 behaviour preserved bit-for-bit.
+// The probe binds this in its init path; if binding fails (no
+// writable virtio-blk), it leaves BlkSink == nil and we degrade
+// gracefully to ConOut-only.
+//
+// Single-writer; the probe is single-goroutine at print time. M1.6
+// does NOT add any synchronisation here — adding a lock would pull
+// runtime/sync into the EFI binary's print path, which we don't want.
+var BlkSink *BlkRingBuffer
+
 // printk emits one byte to the UEFI ConOut as a NUL-terminated UTF-16
 // string. conOut is captured in asm at entry, so this is usable from the
-// earliest runtime prints.
+// earliest runtime prints. When BlkSink is set (M1.6 side-channel
+// probe), the same byte is mirrored into the ring buffer; the BlkSink
+// then auto-flushes to the bound virtio-blk via Block IO on threshold
+// or sentinel.
 //
 //go:linkname printk runtime/goos.Printk
 func printk(c byte) {
+	if BlkSink != nil {
+		BlkSink.BlkPrintk(c)
+	}
 	if conOut == 0 {
 		return
 	}

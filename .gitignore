@@ -8,3 +8,9 @@ esp.img
 vars.fd
 startup.nsh
 *.log
+# Host-side helper binaries — built into the package dir by
+# `go build ./cmd/...`; never committed.
+/cmd/blkprintk-seed/blkprintk-seed
+/cmd/blkprintk-recover/blkprintk-recover
+/blkprintk-seed
+/blkprintk-recover

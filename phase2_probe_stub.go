@@ -2,17 +2,21 @@
 // `-tags phase2_*` probe tags, runPhase2Probe is a compile-time no-op.
 // Phase 1 banner-only behaviour is preserved bit-for-bit.
 //
-// Active probe tags (each defines its own runPhase2Probe):
-//   - phase2_probe    : M0 — GetMemoryMap probe (phase2_probe.go)
-//   - phase2_pcienum  : M1 — PCI IO enumeration + virtio-net identity
-//                       probe (phase2_pcienum.go)
-//   - phase2_snpenum  : M1.5 — EFI_SIMPLE_NETWORK_PROTOCOL handle
-//                       enumeration + MAC peek (phase2_snpenum.go)
+// Active probe tags (the dispatcher in phase2_dispatch.go selects
+// which probes run; this file fires only when ALL are off):
+//   - phase2_probe       : M0   — GetMemoryMap probe (phase2_probe.go)
+//   - phase2_pcienum     : M1   — PCI IO enumeration + virtio-net
+//                                 identity probe (phase2_pcienum.go)
+//   - phase2_snpenum     : M1.5 — EFI_SIMPLE_NETWORK_PROTOCOL handle
+//                                 enumeration + MAC peek (phase2_snpenum.go)
+//   - phase2_blkprintk   : M1.6 — Block IO side-channel print sink
+//                                 (phase2_blkprintk.go) — composes with
+//                                 phase2_pcienum + phase2_snpenum.
 //
-// At most one probe tag may be set at a time; this stub fires when
-// none are set.
+// `phase2_probe` is mutually exclusive with the M1/M1.5/M1.6 dispatcher
+// at build time; the M1/M1.5/M1.6 tags compose freely.
 
-//go:build !phase2_probe && !phase2_pcienum && !phase2_snpenum
+//go:build !phase2_probe && !phase2_pcienum && !phase2_snpenum && !phase2_blkprintk
 
 package main
 
