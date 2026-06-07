@@ -573,6 +573,102 @@ tasks:
       - task: virtionet:efi:riscv64
       - task: virtionet:efi:loong64
 
+  # Phase-2 M2-A probe builds — same pipeline as M2 (PCI + SNP +
+  # Block IO side-channel) PLUS the `phase2_virtionet_packed_tx` tag
+  # in place of `phase2_virtionet_tx`. The probe brings the device
+  # up with the WITH_PACKED accepted-features mask (acks bit 34) and
+  # exercises ARP TX/RX over the packed-virtqueue transport
+  # (Virtio 1.1 §2.7). Outputs go to BOOT<ARCH>-VIRTIONETP.EFI.
+  #
+  # M2-A is the R-M2c Option A experiment — hypothesis: Apple VZ's
+  # host-side virtio-net dispatch only runs when the client
+  # negotiates RING_PACKED (Linux VZ uses packed-ring by default).
+  #
+  # QEMU side requirement: pass `-device
+  # virtio-net-pci,disable-legacy=on,disable-modern=off,packed=on` so
+  # QEMU offers bit 34. Without `packed=on` the probe prints "device
+  # does NOT offer VIRTIO_F_RING_PACKED" and falls through to
+  # split-ring; that's the correct diagnostic, not a failure.
+  virtionetp:elf:amd64:
+    desc: 'Build app_amd64_virtionetp.elf (TamaGo PIE, M2-A + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_packed_tx -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_virtionetp.elf .'
+
+  virtionetp:elf:arm64:
+    desc: 'Build app_arm64_virtionetp.elf (TamaGo PIE, M2-A + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_packed_tx -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_virtionetp.elf .'
+
+  virtionetp:elf:riscv64:
+    desc: 'Build app_riscv64_virtionetp.elf (TamaGo PIE, M2-A + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_packed_tx -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_virtionetp.elf .'
+
+  virtionetp:elf:loong64:
+    desc: 'Build app_loong64_virtionetp.elf (TamaGo PIE, M2-A + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_packed_tx -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_virtionetp.elf .'
+
+  virtionetp:efi:amd64:
+    desc: 'Build Phase-2 M2-A BOOTX64-VIRTIONETP.EFI (packed-virtqueue TX/RX probe).'
+    deps: [virtionetp:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-VIRTIONETP.EFI" "{{.TASKFILE_DIR}}/app_amd64_virtionetp.elf"'
+
+  virtionetp:efi:arm64:
+    desc: 'Build Phase-2 M2-A BOOTAA64-VIRTIONETP.EFI (packed-virtqueue TX/RX probe).'
+    deps: [virtionetp:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-VIRTIONETP.EFI" "{{.TASKFILE_DIR}}/app_arm64_virtionetp.elf"'
+
+  virtionetp:efi:riscv64:
+    desc: 'Build Phase-2 M2-A BOOTRISCV64-VIRTIONETP.EFI (packed-virtqueue TX/RX probe).'
+    deps: [virtionetp:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-VIRTIONETP.EFI" "{{.TASKFILE_DIR}}/app_riscv64_virtionetp.elf"'
+
+  virtionetp:efi:loong64:
+    desc: 'Build Phase-2 M2-A BOOTLOONGARCH64-VIRTIONETP.EFI (packed-virtqueue TX/RX probe).'
+    deps: [virtionetp:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-VIRTIONETP.EFI" "{{.TASKFILE_DIR}}/app_loong64_virtionetp.elf"'
+
+  virtionetp:all:
+    desc: 'Build all four Phase-2 M2-A packed-virtqueue TX/RX probe EFIs.'
+    cmds:
+      - task: virtionetp:efi:amd64
+      - task: virtionetp:efi:arm64
+      - task: virtionetp:efi:riscv64
+      - task: virtionetp:efi:loong64
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -593,9 +689,11 @@ tasks:
       - rm -f app_amd64_pcisnp.elf app_arm64_pcisnp.elf app_riscv64_pcisnp.elf app_loong64_pcisnp.elf
       - rm -f app_amd64_blkprintk.elf app_arm64_blkprintk.elf app_riscv64_blkprintk.elf app_loong64_blkprintk.elf
       - rm -f app_amd64_virtionet.elf app_arm64_virtionet.elf app_riscv64_virtionet.elf app_loong64_virtionet.elf
+      - rm -f app_amd64_virtionetp.elf app_arm64_virtionetp.elf app_riscv64_virtionetp.elf app_loong64_virtionetp.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
       - rm -f BOOTX64-PCISNP.EFI BOOTAA64-PCISNP.EFI BOOTRISCV64-PCISNP.EFI BOOTLOONGARCH64-PCISNP.EFI
       - rm -f BOOTX64-BLKPRINT.EFI BOOTAA64-BLKPRINT.EFI BOOTRISCV64-BLKPRINT.EFI BOOTLOONGARCH64-BLKPRINT.EFI
       - rm -f BOOTX64-VIRTIONET.EFI BOOTAA64-VIRTIONET.EFI BOOTRISCV64-VIRTIONET.EFI BOOTLOONGARCH64-VIRTIONET.EFI
+      - rm -f BOOTX64-VIRTIONETP.EFI BOOTAA64-VIRTIONETP.EFI BOOTRISCV64-VIRTIONETP.EFI BOOTLOONGARCH64-VIRTIONETP.EFI
