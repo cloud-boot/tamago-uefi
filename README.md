@@ -229,7 +229,7 @@ qemu-system-x86_64 -machine q35 -cpu max -m 2048 -nographic \
   -drive if=pflash,format=raw,file=vars.fd \
   -cdrom boot-amd64.iso
 
-# 4'. boot under QEMU/AAVMF (arm64) — image loads + runs cpuinit; runtime hangs (see Status)
+# 4'. boot under QEMU/AAVMF (arm64) — boots end-to-end
 qemu-system-aarch64 -machine virt -cpu max -m 4096 -nographic \
   -bios edk2-aarch64-code.fd \
   -drive format=raw,file=boot-arm64.iso,if=none,id=cd \
