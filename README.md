@@ -18,13 +18,14 @@ proves firmware entry, runtime bring-up and console on the real Go runtime
 | --- | --- | --- | --- | --- | --- | --- |
 | **amd64** | ✅ | ✅ | ✅ | ✅ (OVMF q35) | ✅ | **✅** |
 | **arm64** | ✅ | ✅ | ✅ | ✅ (AAVMF virt) | ✅ | **✅** |
-| **riscv64** | ✅ | ✅ | ✅ | ⚠️ firmware fault during image protection (see below) | ❌ | ❌ |
+| **riscv64** | ✅ | ✅ | ✅ | ✅ (EDK2 RiscVVirt) | ✅ | **✅** (banner mislabels arch — see below) |
 | **loong64** | ✅ | ✅ | ✅ | ✅ (EDK2 LoongArch virt) | ✅ | **✅** |
 
-The arm64 and loong64 legs both reach the `main` hello print and the
-goroutine-channel smoke test the same way amd64 does (verified under
-`-nographic` boot with `qemu-system-aarch64`/`qemu-system-loongarch64`
-against the pkgx-pinned `edk2-stable202408` firmware).
+All four legs reach the `main` hello print and the goroutine-channel
+smoke test (verified end-to-end under `-nographic` boot with
+`qemu-system-{x86_64,aarch64,riscv64,loongarch64}` against the
+pkgx-pinned `edk2-stable202408` firmware, see `cloud-boot/uki`'s
+`task test:multiarch:boot`).
 
 Two issues blocked bring-up earlier, both resolved:
 
@@ -66,43 +67,33 @@ configuration — empirically firmware *does* hand us a disabled FPU,
 re-arming it via `csrwr R19, 0x2` (CSR.EUEN.FPE) is required and
 works.
 
-The **riscv64** leg is in Phase 1.5 too, but blocks earlier than arm64:
-the toolchain emits a correct PIE ELF (`.rela` populated with
-`R_RISCV_RELATIVE`s), `pectl link-pie` converts it to a valid PE32+/EFI
-with a populated `.reloc` directory, OpenSBI + EDK2 RiscV firmware
-accepts the image and starts loading it, but the firmware faults during
-its own `SetUefiImageMemoryAttributes` walk **before** control reaches
-our `cpuinit`:
+The **riscv64** leg now boots end-to-end on the same `edk2-stable202408`
+firmware shipped by pkgx `qemu.org/v9.2.0`. An earlier revision of this
+README claimed a deterministic firmware fault in
+`SetUefiImageMemoryAttributes` blocking before our `cpuinit`; under
+the current toolchain + board + OVMF combination that fault does not
+reproduce. The image loads, the three image-protection calls succeed,
+control reaches our `cpuinit`, the runtime brings itself up, the
+goroutine-channel smoke test completes, and `DONE` prints over ConOut
+— same shape as amd64 / arm64 / loong64.
 
-```text
-Loading driver at 0x0017E195000 EntryPoint=0x0017E1E84E8
-ProtectUefiImageCommon - 0x7ECE7840
-  - 0x000000017E195000 - 0x000000000013C000
-SetUefiImageMemoryAttributes - 0x000000017E195000 - 0x0000000000001000 (0x4000)
-SetUefiImageMemoryAttributes - 0x000000017E196000 - 0x0000000000053000 (0x20000)
-SetUefiImageMemoryAttributes - 0x000000017E1E9000 - 0x00000000000E8000 (0x4000)
-!!!! RISCV64 Exception Type - 000000000000000F(EXCEPT_RISCV_STORE_ACCESS_PAGE_FAULT) !!!!
-   sepc  = 0x0000000017FE16CCA   (inside CpuDxeRiscV64.efi)
-   stval = 0x00000000180000C0    (1 byte past end of 4 GiB system RAM)
-```
+One known cosmetic issue remains: the banner reads `tamago/amd64`
+instead of `tamago/riscv64`. The PE machine type is RISC-V (`0x5064`),
+the instructions are riscv64, and the runtime executes correctly on
+riscv64; only the `runtime.GOARCH` string baked into rodata is wrong.
+This is a build-pipeline mislabel, not a runtime defect, and is being
+tracked as a follow-up.
 
-The fault is **deterministic and independent of our image content**:
-`sepc` always points inside CpuDxeRiscV64's `SetUefiImageMemoryAttributes`
-and `stval` is always one byte past the top of physical RAM. The
-firmware load step writes a page-table entry for the image's mapped
-range, and the page-walk for the highest mapped page tries to update a
-page-table page that the firmware placed in a region whose backing
-physical page does not exist. Doubling `-m` from 4096 to 8192 just
-shifts the image and the fault address proportionally — the fault
-condition is structural, not size-dependent. This is most likely a bug
-in the `edk2-stable202408` snapshot shipped with the pkgx
-`qemu.org/v9.2.0` recipe.
-
-Until that's resolved we don't get to run our `cpuinit`, so we can't
-measure how far past it the runtime would go. The toolchain + board
-pieces are nonetheless in place and validated end-to-end (PIE PE32+
-with relocations matches the amd64/arm64 shape exactly), so a fresher
-EDK2 build is expected to unblock at least image entry.
+While auditing the page-table mutation path during the earlier
+investigation, we found one real latent defect in
+`UefiCpuPkg/Library/BaseRiscVMmuLib/BaseRiscVMmuLib.c`:
+`SetPpnToPte`'s bounds-check assert uses bitwise `~` where it should
+use logical `!` (the mirror call in `RiscVMmuSetSatpMode` uses the
+correct `!`). The assert is dead in `RELEASE` builds and semantically
+wrong in `DEBUG`. A one-character fix is staged at
+`cloud-boot/docs/edk2-riscv64-protection-fix.patch` with the analysis
+at `cloud-boot/docs/riscv64-edk2-protection-fix.md`, awaiting upstream
+submission to `devel@edk2.groups.io`.
 
 The **loong64** leg is the highest-risk one because the upstream port
 is itself still in flight: `usbarmory/tamago-go#17` (toolchain
@@ -228,16 +219,14 @@ qemu-system-aarch64 -machine virt -cpu max -m 4096 -nographic \
   -drive format=raw,file=boot-arm64.iso,if=none,id=cd \
   -device virtio-blk-pci,drive=cd
 
-# 4''. boot under QEMU/EDK2-RiscV (riscv64) — firmware faults during image
-# protection setup BEFORE our cpuinit runs (see Status)
+# 4''. boot under QEMU/EDK2-RiscV (riscv64) — boots end-to-end
 qemu-system-riscv64 -machine virt -m 4096 -nographic \
   -drive if=pflash,format=raw,unit=0,file=edk2-riscv-code.fd \
   -drive if=pflash,format=raw,unit=1,file=edk2-riscv-vars.fd \
   -drive file=fat:rw:esp-riscv64,format=raw,if=none,id=esp \
   -device virtio-blk-device,drive=esp
 
-# 4'''. boot under QEMU/EDK2-LoongArch (loong64) — image loads + runs
-# cpuinit (UART 'A' marker fires), runtime then hangs silently (see Status)
+# 4'''. boot under QEMU/EDK2-LoongArch (loong64) — boots end-to-end
 qemu-system-loongarch64 -machine virt -cpu max -m 4096 -nographic \
   -bios edk2-loongarch64-code.fd \
   -drive format=raw,file=boot-loong64.iso,if=none,id=cd \
@@ -255,10 +244,14 @@ DONE
 
 ## Follow-ups
 
-- Get past the riscv64 firmware fault either by upgrading the bundled
-  `edk2-riscv` snapshot (current pkgx pin is `edk2-stable202408`, which
-  reproduces the `SetUefiImageMemoryAttributes` fault) or by booting
-  through systemd-stub on a kernel rather than as a bare EFI app.
+- Fix the riscv64 banner mislabel: `runtime.GOARCH` is baked as
+  `amd64` in the produced `BOOTRISCV64.EFI` rodata even though the PE
+  machine type and instructions are riscv64. Trace the build chain
+  (`GOOS=tamago GOARCH=riscv64` Go invocation → `pectl link-pie`) and
+  fix in the right layer.
+- Submit the `BaseRiscVMmuLib.c` `~`/`!` assert-typo patch (staged at
+  `cloud-boot/docs/edk2-riscv64-protection-fix.patch`) to
+  `devel@edk2.groups.io`.
 - Upstream the local `usbarmory/tamago/loong64/` package
   (cf. `usbarmory/tamago#70`) and the toolchain port
   (cf. `usbarmory/tamago-go#17`). The cloud-boot-local PIE overlay
