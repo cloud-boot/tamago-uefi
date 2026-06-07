@@ -61,8 +61,9 @@ func TestStripVirtioNetHdrTooShort(t *testing.T) {
 }
 
 func TestAcceptFeatures_HappyPath(t *testing.T) {
-	// Device offers all three we want + a couple of extras.
+	// Device offers all four bits we want + a couple of extras.
 	deviceOffers := VirtioNetFeatureMAC |
+		VirtioNetFeatureMTU |
 		VirtioNetFeatureStatus |
 		VirtioFeatureVersion1 |
 		(1 << 15) | // VIRTIO_NET_F_MRG_RXBUF — we don't accept
@@ -71,9 +72,29 @@ func TestAcceptFeatures_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptFeatures: %v", err)
 	}
+	want := VirtioNetFeatureMTU | VirtioNetFeatureMAC | VirtioNetFeatureStatus | VirtioFeatureVersion1
+	if negotiated != want {
+		t.Errorf("negotiated: got 0x%x, want 0x%x", negotiated, want)
+	}
+}
+
+// TestAcceptFeatures_DeviceMissingMTU covers the QEMU+EDK2 case where
+// the device offers MAC + STATUS + VERSION_1 but not MTU. M2 must
+// negotiate the subset cleanly (MTU is informational; missing-MTU is
+// not an error). The QEMU+EDK2 4-arch PASS cells exercise this path
+// live.
+func TestAcceptFeatures_DeviceMissingMTU(t *testing.T) {
+	deviceOffers := VirtioNetFeatureMAC | VirtioNetFeatureStatus | VirtioFeatureVersion1
+	negotiated, err := AcceptFeatures(deviceOffers)
+	if err != nil {
+		t.Fatalf("AcceptFeatures: %v", err)
+	}
 	want := VirtioNetFeatureMAC | VirtioNetFeatureStatus | VirtioFeatureVersion1
 	if negotiated != want {
 		t.Errorf("negotiated: got 0x%x, want 0x%x", negotiated, want)
+	}
+	if negotiated&VirtioNetFeatureMTU != 0 {
+		t.Errorf("MTU bit set in negotiated mask despite device not offering it")
 	}
 }
 
@@ -144,8 +165,31 @@ func TestVirtioNetQueueIndices(t *testing.T) {
 }
 
 func TestVirtioNetAcceptedFeatures(t *testing.T) {
-	want := VirtioNetFeatureMAC | VirtioNetFeatureStatus | VirtioFeatureVersion1
+	// R-M2b (RESOLVED 2026-06-07): the M2 accepted-features mask MUST
+	// include VIRTIO_NET_F_MTU (bit 3) in addition to MAC | STATUS |
+	// VERSION_1. Apple VZ clears FEATURES_OK if MTU isn't negotiated;
+	// without it the bi-rail Y'' is unable to cover its primary prod
+	// target (vfkit). On QEMU+EDK2 the bit is informational/no-op.
+	// Live empirical narrow on vfkit 0.6.3 arm64 (BOOTAA64-VIRTIONET.EFI
+	// against an ESP virtio-blk + scratch virtio-blk pair) established
+	// that ADDING ONLY MTU to the baseline mask makes FEATURES_OK
+	// stick; no other offered bit on its own does.
+	want := VirtioNetFeatureMTU | VirtioNetFeatureMAC | VirtioNetFeatureStatus | VirtioFeatureVersion1
 	if VirtioNetAcceptedFeatures != want {
 		t.Errorf("AcceptedFeatures: got 0x%x, want 0x%x", VirtioNetAcceptedFeatures, want)
+	}
+	if VirtioNetAcceptedFeatures&VirtioNetFeatureMTU == 0 {
+		t.Errorf("R-M2b regression: MTU bit missing from VirtioNetAcceptedFeatures (Apple VZ will fail FEATURES_OK)")
+	}
+}
+
+// TestVirtioNetFeatureMTU pins the bit number for VIRTIO_NET_F_MTU
+// (Virtio 1.1 §5.1.3 — `VIRTIO_NET_F_MTU = 3`). A typo here would
+// either reintroduce R-M2b (if shifted away from bit 3) or silently
+// ack a wrong-named bit (if mistyped to a different identifier).
+func TestVirtioNetFeatureMTU(t *testing.T) {
+	if VirtioNetFeatureMTU != (1 << 3) {
+		t.Errorf("VirtioNetFeatureMTU: got 0x%x, want 0x%x (Virtio 1.1 §5.1.3 — bit 3)",
+			VirtioNetFeatureMTU, uint64(1<<3))
 	}
 }

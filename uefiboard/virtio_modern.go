@@ -105,6 +105,16 @@ const (
 // only what it strictly needs:
 //
 //	VIRTIO_NET_F_MAC      (5)   device-provided MAC (Virtio 1.1 §5.1.3)
+//	VIRTIO_NET_F_MTU      (3)   device-provided MTU. Informational on
+//	                            QEMU+EDK2 (always offered, no semantic
+//	                            change in the driver path) but
+//	                            REQUIRED by Apple VZ — without it VZ
+//	                            clears FEATURES_OK and the init aborts
+//	                            (R-M2b, RESOLVED 2026-06-07 by live
+//	                            empirical narrow). M2 doesn't read the
+//	                            `mtu` field — it sticks to the
+//	                            default-MTU 1518-byte rxq buffer per
+//	                            VirtioNetMaxFrameSize.
 //	VIRTIO_NET_F_STATUS   (16)  link-up bit (informational; required for
 //	                            the device to publish virtio_net_config.status)
 //	VIRTIO_F_VERSION_1    (32)  modern transport (Virtio 1.1 §6) —
@@ -114,6 +124,7 @@ const (
 // Other bits are not negotiated. If the device REQUIRES one we don't
 // understand (FEATURES_OK won't stick), we surface a clear error.
 const (
+	VirtioNetFeatureMTU    uint64 = 1 << 3  // VIRTIO_NET_F_MTU
 	VirtioNetFeatureMAC    uint64 = 1 << 5  // VIRTIO_NET_F_MAC
 	VirtioNetFeatureStatus uint64 = 1 << 16 // VIRTIO_NET_F_STATUS
 	VirtioFeatureVersion1  uint64 = 1 << 32 // VIRTIO_F_VERSION_1

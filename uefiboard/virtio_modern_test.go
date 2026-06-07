@@ -288,6 +288,11 @@ func TestStatusBits(t *testing.T) {
 }
 
 func TestFeatureBits(t *testing.T) {
+	// VIRTIO_NET_F_MTU = bit 3 (Virtio 1.1 §5.1.3). Required by Apple
+	// VZ per R-M2b (RESOLVED 2026-06-07); informational on QEMU+EDK2.
+	if VirtioNetFeatureMTU != (1 << 3) {
+		t.Errorf("VIRTIO_NET_F_MTU: got 0x%x, want 0x%x", VirtioNetFeatureMTU, uint64(1<<3))
+	}
 	// VIRTIO_NET_F_MAC = bit 5
 	if VirtioNetFeatureMAC != (1 << 5) {
 		t.Errorf("VIRTIO_NET_F_MAC: got 0x%x, want 0x%x", VirtioNetFeatureMAC, uint64(1<<5))

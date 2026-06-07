@@ -106,6 +106,38 @@ func runVirtioNetTxProbe() {
 		return
 	}
 
+	// R-M2b diagnostic — dump the raw device-offered feature bitmap
+	// BEFORE OpenVirtioNet runs the full init. The dump is recovered
+	// via the M1.6 blkprintk side-channel (println auto-tees to
+	// BlkSink) so VZ exposes it even when ConOut captures nothing.
+	// On QEMU+EDK2 it also lands in the serial log. Format is the
+	// two raw 32-bit halves of DeviceFeature so the host can decode
+	// the bitmap without parsing the negotiated mask.
+	//
+	// We open a transient VirtioModernConfig, reset + ACK + DRIVER,
+	// then read both halves. OpenVirtioNet below repeats the reset
+	// (idempotent per Virtio 1.1 §3.1.1) and runs the full init —
+	// so the probe still surfaces the canonical OpenVirtioNet shape
+	// after the diag dump. The dump kept production-side (4 lines)
+	// because it's the canonical R-M2b regression artifact and a
+	// useful one-line "what does this host's virtio-net offer" smoke
+	// test for future hypervisor cells.
+	if diagCfg, derr := uefiboard.InitVirtioModernConfig(pciIO); derr != nil {
+		println("phase2-virtionet-tx: diag: InitVirtioModernConfig FAILED:", derr.Error())
+	} else if derr := diagCfg.SetDeviceStatus(0); derr != nil {
+		println("phase2-virtionet-tx: diag: reset FAILED:", derr.Error())
+	} else if derr := diagCfg.SetDeviceStatus(uefiboard.VirtioStatusAcknowledge | uefiboard.VirtioStatusDriver); derr != nil {
+		println("phase2-virtionet-tx: diag: ACK|DRIVER FAILED:", derr.Error())
+	} else if feats, derr := diagCfg.DeviceFeatures64(); derr != nil {
+		println("phase2-virtionet-tx: diag: DeviceFeatures64 FAILED:", derr.Error())
+	} else {
+		lo := uint32(feats & 0xFFFFFFFF)
+		hi := uint32(feats >> 32)
+		println("phase2-virtionet-tx: vnet device feats: lo=", hex32(lo), "hi=", hex32(hi))
+		// Final reset so OpenVirtioNet (below) starts clean.
+		_ = diagCfg.SetDeviceStatus(0)
+	}
+
 	println("phase2-virtionet-tx: bringing up device (init sequence per Virtio 1.1 §3.1.1)")
 	v, err := uefiboard.OpenVirtioNet(pciIO)
 	if err != nil {

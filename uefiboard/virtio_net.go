@@ -96,6 +96,9 @@ const VirtioNetTxRingSize uint16 = 8
 
 // VirtioNetAcceptedFeatures is the feature mask M2 negotiates ON:
 //
+//	VIRTIO_NET_F_MTU      (3)   device-provided MTU (REQUIRED by Apple VZ;
+//	                            informational/no-op on QEMU+EDK2 — see
+//	                            R-M2b below)
 //	VIRTIO_NET_F_MAC      (5)   device MAC published in DeviceCfg
 //	VIRTIO_NET_F_STATUS   (16)  link-up bit (informational)
 //	VIRTIO_F_VERSION_1    (32)  modern transport (non-negotiable)
@@ -109,7 +112,17 @@ const VirtioNetTxRingSize uint16 = 8
 // on receive), which simplifies the M2 RX path significantly.
 // Virtio 1.1 §5.1.6.4 — "The driver MUST set num_buffers to zero in
 // transmit headers" — applies regardless; we always write 0 there.
-const VirtioNetAcceptedFeatures uint64 = VirtioNetFeatureMAC | VirtioNetFeatureStatus | VirtioFeatureVersion1
+//
+// R-M2b (RESOLVED 2026-06-07). Live VZ diagnostic narrow established
+// that Apple VZ requires VIRTIO_NET_F_MTU (bit 3) to be acked or it
+// clears FEATURES_OK and the init aborts. The bit is informational
+// per Virtio 1.1 §5.1.3 ("if VIRTIO_NET_F_MTU is set, the device
+// MUST set max_virtqueue_pairs to 1 and the driver MAY read
+// virtio_net_config.mtu") — accepting it costs us nothing on the
+// driver side and unblocks the VZ cell. The QEMU+EDK2 cells offer
+// this bit too (QEMU's virtio-net always sets it) so accepting it
+// is a no-op there.
+const VirtioNetAcceptedFeatures uint64 = VirtioNetFeatureMTU | VirtioNetFeatureMAC | VirtioNetFeatureStatus | VirtioFeatureVersion1
 
 // VirtioNetHdr is the Go view of `struct virtio_net_hdr` (Virtio 1.1
 // §5.1.6.1). M2 always emits an all-zero header and ignores the

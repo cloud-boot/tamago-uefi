@@ -23,6 +23,19 @@ func hex8(v uint8) string {
 	return string(buf[:])
 }
 
+// hex32 stringifies a uint32 in 0x-prefixed 8-digit hex.
+func hex32(v uint32) string {
+	const digits = "0123456789abcdef"
+	var buf [10]byte
+	buf[0] = '0'
+	buf[1] = 'x'
+	for i := 0; i < 8; i++ {
+		buf[9-i] = digits[v&0xF]
+		v >>= 4
+	}
+	return string(buf[:])
+}
+
 // hex16 stringifies a uint16 in 0x-prefixed 4-digit hex.
 func hex16(v uint16) string {
 	const digits = "0123456789abcdef"
