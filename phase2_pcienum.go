@@ -27,12 +27,14 @@ import (
 	"github.com/cloud-boot/tamago-uefi/uefiboard"
 )
 
-// runPhase2Probe — when the `phase2_pcienum` build tag is set, this
-// runs the M1 PCI-IO enumeration probe instead of the M0 GetMemoryMap
-// probe. The two are mutually exclusive at build time (each gated on
-// its own tag); both share the same `runPhase2Probe` entry-point name
-// so main.go's call site doesn't change.
-func runPhase2Probe() {
+// runPCIEnumProbe — when the `phase2_pcienum` build tag is set, this
+// runs the M1 PCI-IO enumeration probe (walk every controller
+// publishing EFI_PCI_IO_PROTOCOL, identify virtio devices, walk
+// virtio capabilities). When the tag is NOT set, the no-op stub in
+// phase2_pcienum_stub.go takes over. The probe-dispatch wrapper
+// (phase2_dispatch.go) decides when this runs; `phase2_pcienum` and
+// `phase2_snpenum` may be set together — see phase2_snpenum.go.
+func runPCIEnumProbe() {
 	println("phase2-pcienum: LocateHandleBuffer(EFI_PCI_IO_PROTOCOL_GUID)")
 	handles, err := uefiboard.LocateHandleBuffer(&uefiboard.EFIPciIOProtocolGUID)
 	if err != nil {

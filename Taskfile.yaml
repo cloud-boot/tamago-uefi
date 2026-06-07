@@ -308,6 +308,92 @@ tasks:
       - task: pcienum:efi:riscv64
       - task: pcienum:efi:loong64
 
+  # Phase-2 M1.5 combined probe (PCI-IO + SNP) builds — same pipeline
+  # as the M1 pcienum targets but with BOTH phase2_pcienum AND
+  # phase2_snpenum tags set, so the dispatcher (phase2_dispatch.go)
+  # runs the PCI walk first then the SNP walk in one binary. Outputs
+  # go to BOOT<ARCH>-PCISNP.EFI to keep them separate from the
+  # pcienum-only artifacts.
+  pcisnp:elf:amd64:
+    desc: 'Build app_amd64_pcisnp.elf (TamaGo PIE with -tags phase2_pcienum,phase2_snpenum).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_pcisnp.elf .'
+
+  pcisnp:elf:arm64:
+    desc: 'Build app_arm64_pcisnp.elf (TamaGo PIE with -tags phase2_pcienum,phase2_snpenum).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_pcisnp.elf .'
+
+  pcisnp:elf:riscv64:
+    desc: 'Build app_riscv64_pcisnp.elf (TamaGo PIE with -tags phase2_pcienum,phase2_snpenum).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_pcisnp.elf .'
+
+  pcisnp:elf:loong64:
+    desc: 'Build app_loong64_pcisnp.elf (TamaGo PIE with -tags phase2_pcienum,phase2_snpenum).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_pcisnp.elf .'
+
+  pcisnp:efi:amd64:
+    desc: 'Build Phase-2 M1.5 BOOTX64-PCISNP.EFI (PCI IO + SNP enumeration probe).'
+    deps: [pcisnp:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-PCISNP.EFI" "{{.TASKFILE_DIR}}/app_amd64_pcisnp.elf"'
+
+  pcisnp:efi:arm64:
+    desc: 'Build Phase-2 M1.5 BOOTAA64-PCISNP.EFI (PCI IO + SNP enumeration probe).'
+    deps: [pcisnp:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-PCISNP.EFI" "{{.TASKFILE_DIR}}/app_arm64_pcisnp.elf"'
+
+  pcisnp:efi:riscv64:
+    desc: 'Build Phase-2 M1.5 BOOTRISCV64-PCISNP.EFI (PCI IO + SNP enumeration probe).'
+    deps: [pcisnp:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-PCISNP.EFI" "{{.TASKFILE_DIR}}/app_riscv64_pcisnp.elf"'
+
+  pcisnp:efi:loong64:
+    desc: 'Build Phase-2 M1.5 BOOTLOONGARCH64-PCISNP.EFI (PCI IO + SNP enumeration probe).'
+    deps: [pcisnp:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-PCISNP.EFI" "{{.TASKFILE_DIR}}/app_loong64_pcisnp.elf"'
+
+  pcisnp:all:
+    desc: 'Build all four Phase-2 M1.5 PCI-IO + SNP probe EFIs.'
+    cmds:
+      - task: pcisnp:efi:amd64
+      - task: pcisnp:efi:arm64
+      - task: pcisnp:efi:riscv64
+      - task: pcisnp:efi:loong64
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -325,6 +411,8 @@ tasks:
       - rm -f app.elf app_amd64.elf app_arm64.elf app_riscv64.elf app_loong64.elf
       - rm -f app_amd64_probe.elf app_arm64_probe.elf app_riscv64_probe.elf app_loong64_probe.elf
       - rm -f app_amd64_pcienum.elf app_arm64_pcienum.elf app_riscv64_pcienum.elf app_loong64_pcienum.elf
+      - rm -f app_amd64_pcisnp.elf app_arm64_pcisnp.elf app_riscv64_pcisnp.elf app_loong64_pcisnp.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
+      - rm -f BOOTX64-PCISNP.EFI BOOTAA64-PCISNP.EFI BOOTRISCV64-PCISNP.EFI BOOTLOONGARCH64-PCISNP.EFI
