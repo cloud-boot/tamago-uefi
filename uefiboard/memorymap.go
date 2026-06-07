@@ -113,14 +113,15 @@ type MemoryMap struct {
 	// EBS will reject the key and require a refresh.
 	MapKey uintptr
 
-	// DescriptorVersion is the firmware's claimed descriptor schema
-	// version (currently always 1 across UEFI 2.x). Exposed so callers
-	// can sanity-check; we don't enforce here.
-	DescriptorVersion uint32
-
 	// DescriptorSize is the raw stride reported by firmware. Useful for
 	// diagnostics — the parser already consumed it.
 	DescriptorSize uintptr
+
+	// DescriptorVersion is the firmware's claimed descriptor schema
+	// version (always 1 across UEFI 2.x — EFI_MEMORY_DESCRIPTOR_VERSION
+	// is fixed at 1 by edk2.git MdePkg/Include/Uefi/UefiSpec.h). M1
+	// captures it for diagnostics; the parser does not branch on it.
+	DescriptorVersion uint32
 }
 
 // ErrMapTooSmall is returned by GetMemoryMap if firmware kept reporting

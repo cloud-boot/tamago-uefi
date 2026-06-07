@@ -5,21 +5,20 @@
 // target — eficall_<arch>.s has no host build). The parser + types
 // it relies on live in memorymap.go (host-buildable).
 //
-// efiCall is fixed at 4 args (see eficall_<arch>.s). UEFI's
-// GetMemoryMap has FIVE OUT parameters (MemoryMapSize, MemoryMap,
-// MapKey, DescriptorSize, DescriptorVersion). At M0 we drive the
-// 4-arg form, omitting DescriptorVersion: EDK2's
-// `MdeModulePkg/Core/Dxe/Mem/Page.c::CoreGetMemoryMap` writes
-// `*DescriptorVersion = EFI_MEMORY_DESCRIPTOR_VERSION` only on the
-// success path AND only if the pointer is non-NULL; on the probe
-// (BUFFER_TOO_SMALL) path the field is not written. So the probe is
-// safe with NULL; the real-call writeback we skip — `DescriptorVersion`
-// is always 1 in shipping UEFI 2.x firmware, and we expose only
-// DescriptorSize for diagnostics.
+// efiCall is 5-arg as of Phase 2 M1 (see eficall_<arch>.s for the
+// incident analysis — M0's 4-arg form caused EDK2 stable202408's
+// CoreGetMemoryMap to dereference a stale A4 register on riscv64 and
+// fault on a near-NULL store). The 5th arg is the
+// `EFI_MEMORY_DESCRIPTOR_VERSION` OUT pointer, which we now pass for
+// real so the call is well-defined and the writeback succeeds.
 //
-// If a firmware revision were to start rejecting NULL DescriptorVersion
-// up-front (EFI_INVALID_PARAMETER), the M0 probe surfaces that as a
-// clean error on ConOut and we extend efiCall to 5 args in M1.
+// Reference: edk2.git stable/202408
+//   - MdeModulePkg/Core/Dxe/Mem/Page.c::CoreGetMemoryMap (lines
+//     1881..2090) is the gBS->GetMemoryMap entry. It guards the
+//     `*DescriptorVersion` and `*DescriptorSize` writes with NULL
+//     checks; the M0 thunk's stale-register issue meant DescriptorVersion
+//     was NOT NULL but pointed at a near-NULL address. M1 passes a real
+//     stack-allocated UINT32 here.
 
 //go:build tamago && (amd64 || arm64 || loong64 || riscv64)
 
@@ -68,6 +67,7 @@ func GetMemoryMap() (*MemoryMap, error) {
 	var size uintptr = 0
 	var mapKey uintptr
 	var descSize uintptr
+	var descVer uint32
 
 	status := efiCall(
 		fnSlot,
@@ -75,6 +75,7 @@ func GetMemoryMap() (*MemoryMap, error) {
 		uint64(uintptr(unsafe.Pointer(&probe))),
 		uint64(uintptr(unsafe.Pointer(&mapKey))),
 		uint64(uintptr(unsafe.Pointer(&descSize))),
+		uint64(uintptr(unsafe.Pointer(&descVer))),
 	)
 	if status != efiBufferTooSmall && status != efiSuccess {
 		return nil, &EFIError{Status: status, Op: "GetMemoryMap (probe)"}
@@ -83,8 +84,9 @@ func GetMemoryMap() (*MemoryMap, error) {
 		// Spec-impossible (firmware can't legitimately return SUCCESS
 		// with size=0 for a non-empty memory map); treat as empty.
 		return &MemoryMap{
-			MapKey:         mapKey,
-			DescriptorSize: descSize,
+			MapKey:            mapKey,
+			DescriptorSize:    descSize,
+			DescriptorVersion: descVer,
 		}, nil
 	}
 	if descSize == 0 {
@@ -106,14 +108,16 @@ func GetMemoryMap() (*MemoryMap, error) {
 			uint64(uintptr(unsafe.Pointer(&buf[0]))),
 			uint64(uintptr(unsafe.Pointer(&mapKey))),
 			uint64(uintptr(unsafe.Pointer(&descSize))),
+			uint64(uintptr(unsafe.Pointer(&descVer))),
 		)
 		switch status {
 		case efiSuccess:
 			descs := parseMemoryMap(buf[:size], descSize)
 			return &MemoryMap{
-				Descriptors:    descs,
-				MapKey:         mapKey,
-				DescriptorSize: descSize,
+				Descriptors:       descs,
+				MapKey:            mapKey,
+				DescriptorSize:    descSize,
+				DescriptorVersion: descVer,
 			}, nil
 		case efiBufferTooSmall:
 			bufSize = size + 4*descSize

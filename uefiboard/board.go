@@ -63,10 +63,18 @@ const efiOutputString = 0x08
 // efiCall invokes a UEFI service through its function-pointer slot. The
 // implementation lives in eficall_<arch>.s and respects the platform's
 // UEFI calling convention (MS x64 on amd64, AAPCS64 on arm64, LP64 on
-// riscv64). Returns EFI_STATUS in the low 64 bits.
+// loong64 / riscv64). Returns EFI_STATUS in the low 64 bits.
+//
+// The thunk is 5-arg wide. Phase 2 widened it from 4 to 5 because
+// gBS->GetMemoryMap has 5 OUT params and gBS->LoadImage has 6 args;
+// the M0 4-arg form left A4 (riscv64) carrying a stale pointer which
+// EDK2 then dereferenced as DescriptorVersion. See
+// `eficall_riscv64.s` for the full incident analysis. Callees that
+// take fewer than 5 args ignore the trailing positions — caller passes
+// 0 for unused slots.
 //
 //go:noescape
-func efiCall(fn, a0, a1, a2, a3 uint64) (status uint64)
+func efiCall(fn, a0, a1, a2, a3, a4 uint64) (status uint64)
 
 // printk emits one byte to the UEFI ConOut as a NUL-terminated UTF-16
 // string. conOut is captured in asm at entry, so this is usable from the
@@ -86,5 +94,5 @@ func printk(c byte) {
 func out(c byte) {
 	u16 := [2]uint16{uint16(c), 0}
 	efiCall(conOut+efiOutputString, conOut,
-		uint64(uintptr(unsafe.Pointer(&u16[0]))), 0, 0)
+		uint64(uintptr(unsafe.Pointer(&u16[0]))), 0, 0, 0)
 }
