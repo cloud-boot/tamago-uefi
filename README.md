@@ -24,7 +24,7 @@ proves firmware entry, runtime bring-up and console on the real Go runtime
 All four legs reach the `main` hello print and the goroutine-channel
 smoke test (verified end-to-end under `-nographic` boot with
 `qemu-system-{x86_64,aarch64,riscv64,loongarch64}` against the
-pkgx-pinned `edk2-stable202408` firmware, see `cloud-boot/uki`'s
+pkgx-pinned `edk2-stable202408` firmware, see `cloud-boot/iso`'s
 `task test:multiarch:boot`).
 
 Two issues blocked bring-up earlier, both resolved:
