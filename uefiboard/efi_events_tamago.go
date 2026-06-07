@@ -51,6 +51,7 @@ func CreateEvent(eventType, notifyTPL uint32) (EFIEvent, error) {
 		0, // NotifyFunction
 		0, // NotifyContext
 		uint64(uintptr(unsafe.Pointer(&ev))),
+		0,
 	)
 	if status != efiSuccess {
 		return 0, &EFIError{Status: status, Op: "CreateEvent"}
@@ -76,6 +77,7 @@ func WaitForEvent(ev EFIEvent) error {
 		uint64(uintptr(unsafe.Pointer(&index))),
 		0,
 		0,
+		0,
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "WaitForEvent"}
@@ -96,7 +98,7 @@ func CloseEvent(ev EFIEvent) error {
 	status := efiCall(
 		bs+efiBSCloseEvent,
 		uint64(ev),
-		0, 0, 0, 0,
+		0, 0, 0, 0, 0,
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "CloseEvent"}

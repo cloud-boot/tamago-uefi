@@ -236,28 +236,4 @@ func virtioCapTypeName(t uint8) string {
 	return "Type?"
 }
 
-// hex8 / hex16 — minimal hex stringifiers, matching the dep-light
-// convention used by uefiboard's hexU64. Avoid pulling fmt into the
-// EFI binary.
-func hex8(v uint8) string {
-	const digits = "0123456789abcdef"
-	var buf [4]byte
-	buf[0] = '0'
-	buf[1] = 'x'
-	buf[2] = digits[(v>>4)&0xF]
-	buf[3] = digits[v&0xF]
-	return string(buf[:])
-}
-
-func hex16(v uint16) string {
-	const digits = "0123456789abcdef"
-	var buf [6]byte
-	buf[0] = '0'
-	buf[1] = 'x'
-	buf[2] = digits[(v>>12)&0xF]
-	buf[3] = digits[(v>>8)&0xF]
-	buf[4] = digits[(v>>4)&0xF]
-	buf[5] = digits[v&0xF]
-	return string(buf[:])
-}
 

@@ -53,6 +53,7 @@ func LocateHandleBuffer(guid *EFIGUID) ([]uint64, error) {
 		0, // SearchKey
 		uint64(uintptr(unsafe.Pointer(&count))),
 		uint64(uintptr(unsafe.Pointer(&handles))),
+		0,
 	)
 	if status != efiSuccess {
 		return nil, &EFIError{Status: status, Op: "LocateHandleBuffer"}
@@ -83,6 +84,7 @@ func HandleProtocol(handle uint64, guid *EFIGUID) (uint64, error) {
 		uint64(uintptr(unsafe.Pointer(&iface))),
 		0,
 		0,
+		0,
 	)
 	if status != efiSuccess {
 		return 0, &EFIError{Status: status, Op: "HandleProtocol"}
@@ -105,6 +107,7 @@ func LocateProtocol(guid *EFIGUID) (uint64, error) {
 		uint64(uintptr(unsafe.Pointer(guid))),
 		0, // Registration (NULL — return first)
 		uint64(uintptr(unsafe.Pointer(&iface))),
+		0,
 		0,
 		0,
 	)
@@ -137,6 +140,7 @@ func ServiceBindingCreateChild(sbp uint64) (uint64, error) {
 		0,
 		0,
 		0,
+		0,
 	)
 	if status != efiSuccess {
 		return 0, &EFIError{Status: status, Op: "ServiceBinding.CreateChild"}
@@ -152,6 +156,7 @@ func ServiceBindingDestroyChild(sbp, child uint64) error {
 		sbp+sbpDestroyChild,
 		sbp,
 		child,
+		0,
 		0,
 		0,
 		0,

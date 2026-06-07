@@ -76,6 +76,7 @@ func GetMemoryMap() (*MemoryMap, error) {
 		uint64(uintptr(unsafe.Pointer(&mapKey))),
 		uint64(uintptr(unsafe.Pointer(&descSize))),
 		uint64(uintptr(unsafe.Pointer(&descVer))),
+		0,
 	)
 	if status != efiBufferTooSmall && status != efiSuccess {
 		return nil, &EFIError{Status: status, Op: "GetMemoryMap (probe)"}
@@ -109,6 +110,7 @@ func GetMemoryMap() (*MemoryMap, error) {
 			uint64(uintptr(unsafe.Pointer(&mapKey))),
 			uint64(uintptr(unsafe.Pointer(&descSize))),
 			uint64(uintptr(unsafe.Pointer(&descVer))),
+			0,
 		)
 		switch status {
 		case efiSuccess:

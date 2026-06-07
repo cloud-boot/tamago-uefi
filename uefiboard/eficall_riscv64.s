@@ -22,6 +22,14 @@
 // `cloud-boot/docs/riscv64-edk2-getmemorymap-fix.md` for the full
 // analysis and the upstream-staged EDK2 patch.
 //
+// Phase 2 M2 further widened from 5 to 6 args — needed for
+// EFI_PCI_IO_PROTOCOL.Mem.Read / Mem.Write, whose signature is
+// `(This*, Width, BarIndex, Offset, Count, Buffer*)` — six args.
+// On LP64 the 6th arg lands in A5, trivially. Same lesson as the 5th
+// arg: callers MUST pass a defined value (0 if unused) to avoid
+// faulting firmware on stale-register dereferences. This is enforced
+// by the Go declaration's parameter list.
+//
 // LP64 preserves S0..S11 across calls (and the firmware honours that),
 // so we stash the Go link register (X1/RA) in S0 across the JALR.
 // X27 (S11) is reserved by Go's riscv64 ABI for the g pointer — DO NOT touch.
@@ -29,14 +37,15 @@
 
 #include "textflag.h"
 
-// func efiCall(fn, a0, a1, a2, a3, a4 uint64) (status uint64)
-TEXT ·efiCall(SB),NOSPLIT,$0-56
+// func efiCall(fn, a0, a1, a2, a3, a4, a5 uint64) (status uint64)
+TEXT ·efiCall(SB),NOSPLIT,$0-64
 	MOV	fn+0(FP), T0
 	MOV	a0+8(FP), A0
 	MOV	a1+16(FP), A1
 	MOV	a2+24(FP), A2
 	MOV	a3+32(FP), A3
 	MOV	a4+40(FP), A4
+	MOV	a5+48(FP), A5
 
 	// preserve Go's link register (X1/RA) across the firmware call in S0,
 	// which is callee-saved under LP64.
@@ -49,5 +58,5 @@ TEXT ·efiCall(SB),NOSPLIT,$0-56
 
 	// restore Go RA, publish the EFI_STATUS (A0 holds the LP64 return).
 	MOV	S0, X1
-	MOV	A0, status+48(FP)
+	MOV	A0, status+56(FP)
 	RET

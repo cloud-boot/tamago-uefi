@@ -76,6 +76,7 @@ func BlockIOReadBlocks(blockIO uint64, mediaID uint32, lba uint64, buf []byte) e
 		lba,
 		uint64(len(buf)),
 		uint64(uintptr(unsafe.Pointer(&buf[0]))),
+		0,
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "BlockIO.ReadBlocks"}
@@ -112,6 +113,7 @@ func BlockIOWriteBlocks(blockIO uint64, mediaID uint32, lba uint64, buf []byte) 
 		lba,
 		uint64(len(buf)),
 		uint64(uintptr(unsafe.Pointer(&buf[0]))),
+		0,
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "BlockIO.WriteBlocks"}
@@ -136,7 +138,7 @@ func BlockIOFlushBlocks(blockIO uint64) error {
 	status := efiCall(
 		blockIO+blkIOFlushBlocksOffset,
 		blockIO,
-		0, 0, 0, 0,
+		0, 0, 0, 0, 0,
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "BlockIO.FlushBlocks"}

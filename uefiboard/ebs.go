@@ -65,6 +65,7 @@ func ExitBootServices(mapKey uintptr) error {
 		0,
 		0,
 		0,
+		0,
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "ExitBootServices"}

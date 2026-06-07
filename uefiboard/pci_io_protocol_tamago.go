@@ -51,6 +51,7 @@ func PciIOReadConfig(pciIO uint64, width EFIPciIOWidth, offset uint32, count uin
 		uint64(offset),
 		uint64(count),
 		uint64(uintptr(buf)),
+		0,
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "PciIO.Pci.Read"}
@@ -68,6 +69,7 @@ func PciIOWriteConfig(pciIO uint64, width EFIPciIOWidth, offset uint32, count ui
 		uint64(offset),
 		uint64(count),
 		uint64(uintptr(buf)),
+		0,
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "PciIO.Pci.Write"}
@@ -118,6 +120,7 @@ func PciIOGetLocation(pciIO uint64) (PciLocation, error) {
 		uint64(uintptr(unsafe.Pointer(&bus))),
 		uint64(uintptr(unsafe.Pointer(&dev))),
 		uint64(uintptr(unsafe.Pointer(&fun))),
+		0,
 	)
 	if status != efiSuccess {
 		return PciLocation{}, &EFIError{Status: status, Op: "PciIO.GetLocation"}
@@ -146,6 +149,7 @@ func PciIOAttributesGet(pciIO uint64) (uint64, error) {
 		uint64(EFIPciIOAttributeOpGet),
 		0, // Attributes (input) — unused for Get
 		uint64(uintptr(unsafe.Pointer(&result))),
+		0,
 		0,
 	)
 	if status != efiSuccess {
@@ -177,6 +181,7 @@ func PciIOGetBarAttributes(pciIO uint64, barIndex uint8) (supports uint64, err e
 		uint64(barIndex),
 		uint64(uintptr(unsafe.Pointer(&supp))),
 		0, // Resources OUT — discarded
+		0,
 		0,
 	)
 	if status != efiSuccess {
