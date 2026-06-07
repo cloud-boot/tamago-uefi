@@ -259,6 +259,83 @@ goroutine sum: 499500
 DONE
 ```
 
+## Phase 2 (in progress) — OCI pre-boot loader (shape A)
+
+Phase 2 turns this image into a PXE-class pre-boot agent that runs
+inside UEFI Boot Services, fetches a `kernel + initrd` OCI artifact
+over HTTPS, verifies a signature, calls `ExitBootServices`, and
+hands control to the loaded Linux kernel. It replaces the historical
+`PXE + iPXE + systemd-boot` chain with a single statically-linked Go
+application.
+
+Design doc: [`cloud-boot/docs/tamago-uefi-phase2-oci-loader.md`](https://github.com/cloud-boot/docs/blob/main/tamago-uefi-phase2-oci-loader.md).
+
+Architectural decision: **Path X = drive UEFI Boot Service protocols**
+(`EFI_HTTP_PROTOCOL`, `EFI_DHCP4_PROTOCOL`, `EFI_TLS_PROTOCOL`,
+`EFI_TCP4_PROTOCOL`) rather than write a virtio-net + TCP/IP + TLS
+stack in pure Go. Shape A only needs network *pre-EBS*, so reusing
+the firmware's well-tested NetworkPkg is the right call.
+
+Milestones:
+
+| ID | Scope                                                             | Status |
+| -- | ----------------------------------------------------------------- | ------ |
+| M0 | Design doc, type surface, GetMemoryMap probe                      | done   |
+| M1 | DHCP4 + plaintext HTTP fetch                                      | next   |
+| M2 | TLS + HTTPS (highest-risk milestone)                              | future |
+| M3 | OCI registry client + signature verification                      | future |
+| M4 | Post-EBS memory + per-arch Linux handoff                          | future |
+
+### M0 — done 2026-06-07
+
+`uefiboard/` gained the type surface for the upcoming milestones:
+
+- `ebs.go` — `ExitBootServices(mapKey)` thunk (not called from Phase 1).
+- `memorymap.go` + `memorymap_tamago.go` — `MemoryDescriptor` type +
+  `GetMemoryMap()` wrapper. Stride-aware parser (firmware reports
+  `DescriptorSize` = 48 on every working arch — 40 spec + 8
+  firmware-private bytes — and the parser honours that).
+- `http_protocol.go` — GUIDs and Go struct shapes for the
+  `EFI_HTTP_PROTOCOL` family. No method calls yet; M1 wires them.
+
+A `-tags phase2_probe` build of `main.go` calls `GetMemoryMap`,
+prints `descriptors=`, `descriptorSize=`, `mapKey=` and per-type RAM
+totals to ConOut, then halts. The default build (no `phase2_probe`
+tag) keeps Phase 1's banner-only behaviour bit-for-bit.
+
+Build the probe EFIs:
+
+```sh
+task probe:memory:all          # all four arches
+task probe:memory:amd64        # one arch
+```
+
+The four resulting `BOOT<ARCH>-PROBE.EFI` artifacts pack into a
+multi-arch ISO via `cloud-boot/iso`'s existing pipeline.
+
+End-to-end M0 probe results under QEMU + EDK2-stable202408:
+
+| arch    | descriptors | DescriptorSize | Conventional RAM | status                                                        |
+| ------- | ----------: | -------------: | ---------------: | ------------------------------------------------------------- |
+| amd64   |         119 |             48 |      ~2.09 GiB   | PASS                                                          |
+| arm64   |          31 |             48 |      ~4.22 GiB   | PASS                                                          |
+| loong64 |          51 |             48 |      ~4.18 GiB   | PASS                                                          |
+| riscv64 |         n/a |            n/a |             n/a  | EDK2 faults on NULL `DescriptorVersion` — see design doc §5 R-M0a |
+
+riscv64 has a real M0 finding: EDK2's
+`MdeModulePkg/Core/Dxe/Mem/Page.c::CoreGetMemoryMap` on this arch
+unconditionally writes `*DescriptorVersion` even when the caller
+passes NULL. The other three arches' EDK2 builds guard the write.
+Mitigation deferred to M1, which already needs to extend `efiCall`
+from 4-arg to 5-arg for `LoadImage` (M4).
+
+Host-side unit tests cover the parser + GUID byte layouts:
+
+```sh
+task uefiboard:test
+# coverage: 94.9% of statements (above the >=80% target)
+```
+
 ## Follow-ups
 
 - Submit the `BaseRiscVMmuLib.c` `~`/`!` assert-typo patch (staged at

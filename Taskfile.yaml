@@ -134,8 +134,107 @@ tasks:
     cmds:
       - go test -count=1 -v ./internal/bannertest/...
 
+  # Phase-2 M0 probe builds — same pipeline as the Phase-1 targets but
+  # with the `phase2_probe` build tag, which compiles in
+  # phase2_probe.go's GetMemoryMap call. The default (untagged) build
+  # excludes phase2_probe.go and keeps Phase 1 banner-only behaviour.
+  # Outputs go to BOOT<ARCH>-PROBE.EFI to keep them separate from the
+  # default artifacts.
+  probe:elf:amd64:
+    desc: 'Build app_amd64_probe.elf (TamaGo PIE with -tags phase2_probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_probe -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_probe.elf .'
+
+  probe:elf:arm64:
+    desc: 'Build app_arm64_probe.elf (TamaGo PIE with -tags phase2_probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_probe -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_probe.elf .'
+
+  probe:elf:riscv64:
+    desc: 'Build app_riscv64_probe.elf (TamaGo PIE with -tags phase2_probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_probe -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_probe.elf .'
+
+  probe:elf:loong64:
+    desc: 'Build app_loong64_probe.elf (TamaGo PIE with -tags phase2_probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_probe -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_probe.elf .'
+
+  probe:memory:amd64:
+    desc: 'Build Phase-2 M0 probe BOOTX64-PROBE.EFI (GetMemoryMap smoke test).'
+    deps: [probe:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-PROBE.EFI" "{{.TASKFILE_DIR}}/app_amd64_probe.elf"'
+
+  probe:memory:arm64:
+    desc: 'Build Phase-2 M0 probe BOOTAA64-PROBE.EFI (GetMemoryMap smoke test).'
+    deps: [probe:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-PROBE.EFI" "{{.TASKFILE_DIR}}/app_arm64_probe.elf"'
+
+  probe:memory:riscv64:
+    desc: 'Build Phase-2 M0 probe BOOTRISCV64-PROBE.EFI (GetMemoryMap smoke test).'
+    deps: [probe:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-PROBE.EFI" "{{.TASKFILE_DIR}}/app_riscv64_probe.elf"'
+
+  probe:memory:loong64:
+    desc: 'Build Phase-2 M0 probe BOOTLOONGARCH64-PROBE.EFI (GetMemoryMap smoke test).'
+    deps: [probe:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-PROBE.EFI" "{{.TASKFILE_DIR}}/app_loong64_probe.elf"'
+
+  probe:memory:all:
+    desc: 'Build all four Phase-2 M0 probe EFIs.'
+    cmds:
+      - task: probe:memory:amd64
+      - task: probe:memory:arm64
+      - task: probe:memory:riscv64
+      - task: probe:memory:loong64
+
+  # uefiboard:test — host-side unit tests for the M0 parser/types
+  # (memorymap.go, http_protocol.go). Does NOT exercise the live
+  # GetMemoryMap call (that lives in the --tag phase2_probe binary;
+  # boot it under QEMU/OVMF for the live smoke test).
+  uefiboard:test:
+    desc: 'Run host-side uefiboard unit tests (parser + GUID layouts).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -v ./uefiboard/...
+
   clean:
     desc: Remove built ELFs and EFIs.
     cmds:
       - rm -f app.elf app_amd64.elf app_arm64.elf app_riscv64.elf app_loong64.elf
+      - rm -f app_amd64_probe.elf app_arm64_probe.elf app_riscv64_probe.elf app_loong64_probe.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
+      - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI

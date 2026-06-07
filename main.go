@@ -2,11 +2,24 @@
 //
 // A pure-Go bare-metal UEFI application built on the standard Go runtime
 // via TamaGo (GOOS=tamago, GOARCH=amd64/arm64/loong64/riscv64). It uses
-// cloud-boot's OWN UEFI
-// board (package uefiboard) — NOT go-boot — for the firmware entry, the
-// MS x64 service-call thunk, and ConOut wiring. This first milestone only
-// proves the entry + runtime bring-up + console: it prints over the UEFI
-// ConOut and halts (ExitBootServices and the real loader come later).
+// cloud-boot's OWN UEFI board (package uefiboard) — NOT go-boot — for
+// the firmware entry, the per-arch service-call thunk, and ConOut
+// wiring.
+//
+// Default build: Phase-1 banner only (prints + goroutine sum + halt).
+// Phase 2 milestones add their probes behind build tags:
+//
+//   - `phase2_probe`  : M0 — GetMemoryMap, print summary, halt.
+//
+// Build tags compose with the existing `linkcpuinit,linkramstart` set
+// the Taskfile pins, e.g.
+//
+//	GOOS=tamago GOARCH=arm64 $TAMAGO/bin/go build \
+//	    -tags linkcpuinit,linkramstart,phase2_probe \
+//	    -trimpath -buildmode=pie -ldflags "-E cpuinit" -o app.elf .
+//
+// Phase 2's design doc lives at
+// `cloud-boot/docs/tamago-uefi-phase2-oci-loader.md`.
 package main
 
 import (
@@ -30,6 +43,11 @@ func main() {
 		done <- sum
 	}()
 	println("goroutine sum:", <-done)
+
+	// Phase-2 M0 probe — opt-in via `-tags phase2_probe`. When NOT
+	// built with that tag, runPhase2Probe is the no-op stub in
+	// phase2_probe_stub.go and Phase 1 behaviour is preserved exactly.
+	runPhase2Probe()
 
 	println("DONE — halting")
 	for {
