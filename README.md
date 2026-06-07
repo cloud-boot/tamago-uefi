@@ -77,12 +77,17 @@ control reaches our `cpuinit`, the runtime brings itself up, the
 goroutine-channel smoke test completes, and `DONE` prints over ConOut
 — same shape as amd64 / arm64 / loong64.
 
-One known cosmetic issue remains: the banner reads `tamago/amd64`
-instead of `tamago/riscv64`. The PE machine type is RISC-V (`0x5064`),
-the instructions are riscv64, and the runtime executes correctly on
-riscv64; only the `runtime.GOARCH` string baked into rodata is wrong.
-This is a build-pipeline mislabel, not a runtime defect, and is being
-tracked as a follow-up.
+An earlier revision of this README documented a build-pipeline
+mislabel — `BOOTRISCV64.EFI` rodata contained `tamago/amd64` instead
+of `tamago/riscv64`. The root cause was a stale host `GOARCH=amd64`
+leaking into the riscv64 `go build` invocation, so the riscv64 ELF
+was emitted with RISC-V codegen but amd64 internal constants. Fixed
+in `Taskfile.yaml`: each arch's `elf:`/`efi:` task pins its full env
+(`GOOS`, `GOARCH`, `GOOSPKG`, `CGO_ENABLED`, `GOWORK`) inside the
+task's `env:` block, eliminating cross-arch env bleed. A new
+`internal/bannertest` regression test loads each `BOOT<ARCH>.EFI` and
+asserts its rodata contains the matching `GOOS=tamago GOARCH=<arch>`
+strings and no other arch's banner.
 
 While auditing the page-table mutation path during the earlier
 investigation, we found one real latent defect in
