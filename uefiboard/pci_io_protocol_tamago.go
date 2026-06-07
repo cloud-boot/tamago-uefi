@@ -158,6 +158,57 @@ func PciIOAttributesGet(pciIO uint64) (uint64, error) {
 	return result, nil
 }
 
+// PciIOAttributesEnable wraps the EFI_PCI_IO_PROTOCOL_ATTRIBUTES
+// service in `Enable` form: the attribute bits in `attrs` are
+// OR'd into the device's current set, then the firmware programs
+// the device's PCI command register accordingly. This is THE call
+// that asserts bus-master enable (BME) on the device — without it
+// the device's DMA reads/writes are silently dropped by the
+// platform's IOMMU / PCI host bridge.
+//
+// On QEMU+EDK2 the PciBus driver implicitly enables BusMaster +
+// Memory when it binds the PCI IO protocol to a child device, so
+// the M2 driver never needed to call this explicitly to pass the
+// 4 QEMU cells. On Apple VZ (vfkit 0.6.3) the firmware does NOT
+// pre-enable BusMaster on virtio-net by default — the driver MUST
+// assert BME explicitly before queuing descriptors. This is the
+// R-M2c smoking gun, surfaced by the diagnostic dump in
+// `phase2_virtionet_tx.go`: every queue register stored correctly,
+// avail.idx incremented, doorbell written, but the device never
+// reads avail (because its DMA is gated off).
+//
+// `attrs` is an OR of the EFIPciIOAttribute* constants (Memory,
+// BusMaster, IO, ...). The virtio-modern driver wants
+// `Memory | BusMaster` (the BAR-window reads happen through
+// PciIo.Mem.Read which is firmware-mediated and works regardless of
+// the PCI command register bit; but the DEVICE-side DMA absolutely
+// needs BusMaster).
+//
+// EFI_PCI_IO_PROTOCOL.Attributes signature (UEFI 2.10 §13.4.13):
+//
+//	EFI_STATUS Attributes(
+//	    IN  EFI_PCI_IO_PROTOCOL                       *This,
+//	    IN  EFI_PCI_IO_PROTOCOL_ATTRIBUTE_OPERATION    Operation,
+//	    IN  UINT64                                     Attributes,
+//	    OUT UINT64                                    *Result OPTIONAL );
+//
+// (4 args; we pass 0 in slot 5.)
+func PciIOAttributesEnable(pciIO uint64, attrs uint64) error {
+	status := efiCall(
+		pciIO+pciIOAttributes,
+		pciIO,
+		uint64(EFIPciIOAttributeOpEnable),
+		attrs,
+		0, // Result OUT optional — we don't need it
+		0,
+		0,
+	)
+	if status != efiSuccess {
+		return &EFIError{Status: status, Op: "PciIO.Attributes (Enable)"}
+	}
+	return nil
+}
+
 // PciIOGetBarAttributes returns the firmware's supported attribute
 // bitmask + resource-descriptor list for the BAR. M1 prints the
 // supported attribute mask only; the resource list is firmware-allocated

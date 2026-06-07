@@ -33,6 +33,8 @@
 package main
 
 import (
+	"unsafe"
+
 	"github.com/cloud-boot/tamago-uefi/uefiboard"
 )
 
@@ -138,6 +140,21 @@ func runVirtioNetTxProbe() {
 		_ = diagCfg.SetDeviceStatus(0)
 	}
 
+	// R-M2c narrow: try OpenVirtioNet first with the standard mask.
+	// If that brings the device up but TX still fails, the next
+	// hypothesis is "Apple VZ wants more bits acked." We surface that
+	// via the diagnostic sweep at the end of the run; OpenVirtioNet
+	// itself stays on the spec-clean narrow mask.
+	// R-M2c diagnostic — read the PCI command register before and
+	// after OpenVirtioNet. Bit 1 = MemoryEnable, bit 2 = BusMaster.
+	// Both MUST be 1 for the device's DMA to flow.
+	if cmd, cerr := uefiboard.PciIOReadConfigU16(pciIO, uefiboard.PCICfgCommand); cerr != nil {
+		println("phase2-virtionet-tx: PCI cmd read (pre-open) FAILED:", cerr.Error())
+	} else {
+		println("phase2-virtionet-tx: PCI command register (pre-open) =", hex16(cmd),
+			"(MemEn=", uint64(cmd&0x2)>>1, "BusMaster=", uint64(cmd&0x4)>>2, ")")
+	}
+
 	println("phase2-virtionet-tx: bringing up device (init sequence per Virtio 1.1 §3.1.1)")
 	v, err := uefiboard.OpenVirtioNet(pciIO)
 	if err != nil {
@@ -147,7 +164,75 @@ func runVirtioNetTxProbe() {
 	println("phase2-virtionet-tx: device UP. MAC =", v.MAC.String())
 	println("phase2-virtionet-tx: negotiated features (hex) =", hexU64(v.NegotiatedFeatures))
 
-	// Emit the QEMU-flavoured ARP first.
+	// Read PCI command register AFTER OpenVirtioNet — should now
+	// reflect the AttributesEnable we issued at step 0.
+	if cmd, cerr := uefiboard.PciIOReadConfigU16(pciIO, uefiboard.PCICfgCommand); cerr != nil {
+		println("phase2-virtionet-tx: PCI cmd read (post-open) FAILED:", cerr.Error())
+	} else {
+		println("phase2-virtionet-tx: PCI command register (post-open) =", hex16(cmd),
+			"(MemEn=", uint64(cmd&0x2)>>1, "BusMaster=", uint64(cmd&0x4)>>2, ")")
+	}
+	if attrs, aerr := uefiboard.PciIOAttributesGet(pciIO); aerr != nil {
+		println("phase2-virtionet-tx: PciIOAttributesGet FAILED:", aerr.Error())
+	} else {
+		println("phase2-virtionet-tx: PciIO attributes (post-open) =", hexU64(attrs))
+	}
+
+	// R-M2c diagnostic — also print the device features actually
+	// stored by the device side after we wrote FEATURES_OK. The two
+	// reads (DeviceFeatures64 here vs the BEFORE-init dump at the
+	// top) should match: the device offers the same bitmap before
+	// and after the handshake. Discrepancy would signal a
+	// re-negotiation issue we missed.
+	if feats, err := v.Cfg.DeviceFeatures64(); err == nil {
+		lo := uint32(feats & 0xFFFFFFFF)
+		hi := uint32(feats >> 32)
+		println("phase2-virtionet-tx: vnet device feats (post-init): lo=", hex32(lo), "hi=", hex32(hi))
+	}
+
+	// R-M2c diagnostic — dump the doorbell-locator inputs so the
+	// host can verify the per-queue notify address arithmetic
+	// against the spec (Virtio 1.1 §4.1.4.4):
+	//     addr = NotifyCfgOffset + queue_notify_off * NotifyOffMultiplier
+	// Both queues are dumped (RX = 0, TX = 1). On VZ the
+	// `NotifyCfgLength` is 8 and the multiplier is 4 (per the
+	// pre-R-M2c live boot recovery) so the two doorbells are
+	// expected at offset 16384 + 0 and 16384 + 4. If VZ publishes a
+	// different shape this dump surfaces it before TX touches the
+	// queue.
+	rxq := v.RxQueue()
+	txq := v.TxQueue()
+	if rxq != nil && txq != nil {
+		println("phase2-virtionet-tx: notify cfg: BAR=", uint64(v.Cfg.NotifyCfgBAR),
+			"offset=", hexU64(v.Cfg.NotifyCfgOffset),
+			"length=", hexU64(uint64(v.Cfg.NotifyCfgLength)),
+			"multiplier=", hexU64(uint64(v.Cfg.NotifyOffMultiplier)))
+		println("phase2-virtionet-tx: rxq notify_off=", hex16(rxq.NotifyOff),
+			"doorbell BAR-offset=", hexU64(v.Cfg.PerQueueNotifyOffset(rxq.NotifyOff)),
+			"layout size=", uint64(rxq.Layout.Size),
+			"base phys=", hexU64(rxq.BasePhys))
+		println("phase2-virtionet-tx: txq notify_off=", hex16(txq.NotifyOff),
+			"doorbell BAR-offset=", hexU64(v.Cfg.PerQueueNotifyOffset(txq.NotifyOff)),
+			"layout size=", uint64(txq.Layout.Size),
+			"base phys=", hexU64(txq.BasePhys))
+		println("phase2-virtionet-tx: txq Layout: DescTableOff=", uint64(txq.Layout.DescTableOffset),
+			"AvailRingOff=", uint64(txq.Layout.AvailRingOffset),
+			"UsedRingOff=", uint64(txq.Layout.UsedRingOffset),
+			"TotalSize=", uint64(txq.Layout.TotalSize))
+
+		// R-M2c diagnostic — re-select each queue and read back the
+		// QueueDesc/Driver/Device/Enable registers VZ should have
+		// stored when OpenVirtioNet wrote them. A mismatch (e.g.
+		// VZ silently dropping the 64-bit MMIO write and reading
+		// back zero) would unambiguously point at the address-publish
+		// step.
+		dumpQueueReadback(v.Cfg, uefiboard.VirtioNetRxQueueIdx, "rxq")
+		dumpQueueReadback(v.Cfg, uefiboard.VirtioNetTxQueueIdx, "txq")
+	}
+
+	// Emit the QEMU-flavoured ARP first — keep this path on the
+	// production TransmitFrame helper so the QEMU 4-arch PASS
+	// regression seam is unchanged.
 	arpQEMU := buildARPRequest(v.MAC, VirtioNetTxQEMUSourceIP, VirtioNetTxQEMUTargetIP)
 	println("phase2-virtionet-tx: TX ARP request (QEMU NAT, 10.0.2.15 -> 10.0.2.2), len =", len(arpQEMU))
 	if err := v.TransmitFrame(arpQEMU); err != nil {
@@ -156,13 +241,37 @@ func runVirtioNetTxProbe() {
 		println("phase2-virtionet-tx: TX OK (QEMU)")
 	}
 
-	// And the VZ-flavoured one.
+	// And the VZ-flavoured one — route through the instrumented
+	// path so VZ surfaces the descriptor / avail / used ring state
+	// around the TX. On QEMU+EDK2 this path also succeeds (the
+	// instrumentation is pure-observability — same writes, extra
+	// reads) so the same probe binary covers both cells.
 	arpVZ := buildARPRequest(v.MAC, VirtioNetTxVZSourceIP, VirtioNetTxVZTargetIP)
 	println("phase2-virtionet-tx: TX ARP request (VZ NAT, 192.168.64.2 -> 192.168.64.1), len =", len(arpVZ))
-	if err := v.TransmitFrame(arpVZ); err != nil {
-		println("phase2-virtionet-tx: TransmitFrame(VZ) FAILED:", err.Error())
+	if err := transmitFrameDiag(v, arpVZ); err != nil {
+		println("phase2-virtionet-tx: transmitFrameDiag(VZ) FAILED:", err.Error())
 	} else {
 		println("phase2-virtionet-tx: TX OK (VZ)")
+	}
+
+	// R-M2c hypothesis sweep #2 — re-open the device with the WIDE
+	// mask (everything VZ offers minus RING_PACKED) and retry TX. If
+	// this works the diagnosis is Case IV with a clean follow-up:
+	// widen `VirtioNetAcceptedFeatures` to match. We never expose
+	// the wide-open as production behaviour without the narrow first
+	// confirming the QEMU 4 arches stay PASS.
+	println("phase2-virtionet-tx: R-M2c narrow — retry with WIDE feature mask")
+	if v2, werr := openVirtioNetWideMask(pciIO); werr != nil {
+		println("phase2-virtionet-tx: wide-mask OpenVirtioNet FAILED:", werr.Error())
+	} else {
+		println("phase2-virtionet-tx: wide-mask OpenVirtioNet OK. MAC=", v2.MAC.String(),
+			"negotiated=", hexU64(v2.NegotiatedFeatures))
+		arpVZ2 := buildARPRequest(v2.MAC, VirtioNetTxVZSourceIP, VirtioNetTxVZTargetIP)
+		if terr := transmitFrameDiag(v2, arpVZ2); terr != nil {
+			println("phase2-virtionet-tx: wide-mask transmitFrameDiag FAILED:", terr.Error())
+		} else {
+			println("phase2-virtionet-tx: wide-mask TX OK *** R-M2c CASE IV CONFIRMED ***")
+		}
 	}
 
 	// Poll for an ARP reply for ~5 seconds (rough — each PollUsed
@@ -219,6 +328,232 @@ func buildARPRequest(srcMAC uefiboard.MAC6, srcIP [4]byte, dstIP [4]byte) []byte
 	// THA: zero (don't know it)
 	copy(frame[38:42], dstIP[:])
 	return frame
+}
+
+// dumpQueueReadback re-selects a queue and reads back the four key
+// per-queue registers (Desc, Driver, Device, Enable). Used by the
+// R-M2c narrow to verify VZ stored the addresses M2 wrote during
+// `setupQueue`.
+func dumpQueueReadback(cfg *uefiboard.VirtioModernConfig, queueIdx uint16, label string) {
+	if err := cfg.SelectQueue(queueIdx); err != nil {
+		println("phase2-virtionet-tx: readback ", label, ": SelectQueue FAILED:", err.Error())
+		return
+	}
+	d, derr := cfg.QueueDesc()
+	dr, drerr := cfg.QueueDriver()
+	de, deerr := cfg.QueueDevice()
+	en, enerr := cfg.QueueEnable()
+	if derr != nil || drerr != nil || deerr != nil || enerr != nil {
+		println("phase2-virtionet-tx: readback ", label, ": one or more reads FAILED")
+		return
+	}
+	println("phase2-virtionet-tx: readback ", label,
+		" QueueDesc=", hexU64(d),
+		" QueueDriver=", hexU64(dr),
+		" QueueDevice=", hexU64(de),
+		" QueueEnable=", hex16(en))
+}
+
+// openVirtioNetWideMask drives the M2 init sequence with the
+// R-M2c-wide accepted-features mask (everything VZ offers minus
+// RING_PACKED). On QEMU+EDK2 the device-offered set lacks the
+// Apple-private bits, so the negotiated mask collapses to the
+// standard QEMU set and behaviour is unchanged. On VZ this widens
+// the mask to include bits 28/29 (Apple-private) and the various
+// checksum/TSO bits, testing whether any of those is the missing
+// dispatch trigger for VZ's TX path.
+func openVirtioNetWideMask(pciIO uint64) (*uefiboard.VirtioNet, error) {
+	return uefiboard.OpenVirtioNetWithFeatures(pciIO, uefiboard.VirtioNetAcceptedFeaturesNarrow)
+}
+
+// transmitFrameDiag is an instrumented copy of
+// `(*VirtioNet).TransmitFrame` that dumps the TX descriptor, the
+// avail-ring header word, the per-queue notification address arithmetic,
+// the used-ring header BEFORE notify, the used-ring header AFTER
+// notify, and the used-ring header every 1000 poll iterations during
+// the wait. It exists for the R-M2c diagnostic narrow; once R-M2c is
+// closed the production VZ TX path can revert to `TransmitFrame`.
+//
+// Poll budget is capped at 50000 (vs. the production 10000) — a 5x
+// bump that's enough to confirm "the device never publishes" on VZ
+// without dragging the run wall-clock past the harness timeout. The
+// pre-R-M2c prototype bumped to 500000 (50x) and still saw no
+// publication, so 5x is a comfortable margin.
+//
+// The dump shape is deliberately byte-level so the host can decode the
+// fields without trusting any Go-side struct interpretation that might
+// itself be the bug.
+func transmitFrameDiag(v *uefiboard.VirtioNet, frame []byte) error {
+	txq := v.TxQueue()
+	if txq == nil {
+		println("phase2-virtionet-tx: diag: txq is nil")
+		return nil
+	}
+	totalLen := uefiboard.VirtioNetHdrSize + len(frame)
+	phys, addr, err := uefiboard.AllocDMABuffer(uintptr(totalLen))
+	if err != nil {
+		return err
+	}
+	dst := unsafe.Slice((*byte)(unsafe.Pointer(addr)), totalLen)
+	copy(dst[uefiboard.VirtioNetHdrSize:], frame)
+	println("phase2-virtionet-tx: diag: DMA buf phys=", hexU64(phys), "len=", uint64(totalLen))
+
+	// Capture state BEFORE AddBuffer publishes the descriptor.
+	preAvailIdx := txq.NextAvailIdx()
+	preUsedIdx := txq.UsedIdx()
+	preUsedIdxRaw := txq.UsedIdxRaw()
+	println("phase2-virtionet-tx: diag: pre-AddBuffer: NextAvailIdx=", hex16(preAvailIdx),
+		"UsedIdx(atomic)=", hex16(preUsedIdx), "UsedIdx(raw)=", hex16(preUsedIdxRaw))
+
+	descIdx, err := txq.AddBuffer(addr, phys, uint32(totalLen), false)
+	if err != nil {
+		return err
+	}
+	println("phase2-virtionet-tx: diag: AddBuffer descIdx=", hex16(descIdx))
+
+	// Dump descriptor[0].
+	dumpHexBytes("desc[0]=", txq.DescBytes(descIdx))
+	dumpHexBytes("avail[0..8]=", txq.AvailHeaderBytes())
+	dumpHexBytes("used[0..16] (pre-notify)=", txq.UsedHeaderBytes())
+
+	// Compute + log the doorbell coordinates.
+	doorbellOff := v.Cfg.PerQueueNotifyOffset(txq.NotifyOff)
+	println("phase2-virtionet-tx: diag: doorbell write: BAR=", uint64(v.Cfg.NotifyCfgBAR),
+		"offset=", hexU64(doorbellOff), "value=", hex16(uefiboard.VirtioNetTxQueueIdx))
+
+	if err := v.Cfg.NotifyQueue(uefiboard.VirtioNetTxQueueIdx, txq.NotifyOff); err != nil {
+		println("phase2-virtionet-tx: diag: NotifyQueue FAILED:", err.Error())
+		return err
+	}
+	println("phase2-virtionet-tx: diag: notify OK; entering poll")
+
+	// Dump used immediately after notify (should still be unchanged
+	// or already updated if device responded synchronously).
+	dumpHexBytes("used[0..16] (post-notify)=", txq.UsedHeaderBytes())
+
+	const pollBudget = 50000
+	const pollSampleEvery = 1000
+	for spin := 0; spin < pollBudget; spin++ {
+		gotIdx, _, ok := txq.PollUsed()
+		if !ok {
+			if spin%pollSampleEvery == pollSampleEvery-1 {
+				rawIdx := txq.UsedIdxRaw()
+				atomIdx := txq.UsedIdx()
+				println("phase2-virtionet-tx: diag: poll spin=", uint64(spin+1),
+					"UsedIdx(atomic)=", hex16(atomIdx),
+					"UsedIdx(raw)=", hex16(rawIdx))
+				if spin+1 == pollSampleEvery {
+					// First sample also dumps the full used header.
+					dumpHexBytes("used[0..16] (poll sample)=", txq.UsedHeaderBytes())
+				}
+			}
+			continue
+		}
+		println("phase2-virtionet-tx: diag: TX completion observed at spin=", uint64(spin),
+			"descIdx=", hex16(gotIdx))
+		dumpHexBytes("used[0..16] (post-completion)=", txq.UsedHeaderBytes())
+		_ = txq.Reclaim(gotIdx)
+		return nil
+	}
+
+	// Poll timeout — surface the device status one more time so the
+	// host can tell if VZ flipped NEEDS_RESET or FAILED.
+	if status, statusErr := v.Cfg.DeviceStatus(); statusErr != nil {
+		println("phase2-virtionet-tx: diag: final DeviceStatus read FAILED:", statusErr.Error())
+	} else {
+		println("phase2-virtionet-tx: diag: final DeviceStatus=", hex8(status))
+	}
+	dumpHexBytes("used[0..16] (timeout)=", txq.UsedHeaderBytes())
+	dumpHexBytes("avail[0..8] (timeout)=", txq.AvailHeaderBytes())
+	dumpHexBytes("desc[0] (timeout)=", txq.DescBytes(descIdx))
+
+	// R-M2c hypothesis sweep — try alternate doorbell shapes by
+	// adding fresh buffers (each bumps avail.idx so the device sees a
+	// new entry) and notifying with a different MMIO width / offset.
+	// Whichever shape makes used.idx move is the one VZ honors.
+	//
+	// Order:
+	//   1. uint32 write to the per-queue offset (the multiplier-wide
+	//      slot).
+	//   2. uint16 write to the SHARED offset (NotifyCfgOffset+0) —
+	//      tests the "single doorbell" interpretation despite a
+	//      published per-queue stride.
+	//   3. uint32 write to the SHARED offset.
+	rxq := v.RxQueue()
+	notifySweep(v, txq, "uint32@perQ", uefiboard.VirtioNetTxQueueIdx, txq.NotifyOff, true)
+	notifySweep(v, txq, "uint16@offset0", uefiboard.VirtioNetTxQueueIdx, 0, false)
+	notifySweep(v, txq, "uint32@offset0", uefiboard.VirtioNetTxQueueIdx, 0, true)
+	if rxq != nil {
+		dumpHexBytes("rxq used[0..16] (post-sweep)=", rxq.UsedHeaderBytes())
+		println("phase2-virtionet-tx: diag: rxq UsedIdx(atomic)=", hex16(rxq.UsedIdx()),
+			"NextAvailIdx=", hex16(rxq.NextAvailIdx()))
+	}
+	return uefiboard.ErrTransmitTimeout
+}
+
+// notifySweep adds a fresh TX buffer and notifies the device with a
+// specific MMIO shape (uint32 vs uint16, per-queue vs offset-0), then
+// polls the used ring for a short budget. Surfaces whether the device
+// honors that particular doorbell shape.
+func notifySweep(v *uefiboard.VirtioNet, txq *uefiboard.Virtqueue, label string, queueIdx uint16, notifyOff uint16, useU32 bool) {
+	phys, addr, err := uefiboard.AllocDMABuffer(64)
+	if err != nil {
+		println("phase2-virtionet-tx: sweep ", label, ": AllocDMABuffer FAILED:", err.Error())
+		return
+	}
+	dst := unsafe.Slice((*byte)(unsafe.Pointer(addr)), 64)
+	// Re-emit the VZ ARP into the fresh buffer; the device only
+	// matters about avail.idx moving, but a valid frame keeps the
+	// host stack happy if the doorbell actually fires.
+	arp := buildARPRequest(v.MAC, VirtioNetTxVZSourceIP, VirtioNetTxVZTargetIP)
+	copy(dst[uefiboard.VirtioNetHdrSize:], arp)
+	descIdx, addErr := txq.AddBuffer(addr, phys, uint32(uefiboard.VirtioNetHdrSize+len(arp)), false)
+	if addErr != nil {
+		println("phase2-virtionet-tx: sweep ", label, ": AddBuffer FAILED:", addErr.Error())
+		return
+	}
+	doorbellOff := v.Cfg.PerQueueNotifyOffset(notifyOff)
+	println("phase2-virtionet-tx: sweep ", label, ": descIdx=", hex16(descIdx),
+		"avail.idx=", hex16(txq.NextAvailIdx()),
+		"writing", map[bool]string{true: "u32", false: "u16"}[useU32],
+		"to BAR-offset=", hexU64(doorbellOff),
+		"value=", hex16(queueIdx))
+
+	var werr error
+	if useU32 {
+		werr = uefiboard.PciIOMemWrite32(v.Cfg.PciIO, v.Cfg.NotifyCfgBAR, doorbellOff, uint32(queueIdx))
+	} else {
+		werr = uefiboard.PciIOMemWrite16(v.Cfg.PciIO, v.Cfg.NotifyCfgBAR, doorbellOff, queueIdx)
+	}
+	if werr != nil {
+		println("phase2-virtionet-tx: sweep ", label, ": MMIO write FAILED:", werr.Error())
+		return
+	}
+	// Short poll for completion — 5000 iterations is enough; if the
+	// device honors this shape it'll publish in microseconds.
+	for spin := 0; spin < 5000; spin++ {
+		gotIdx, _, ok := txq.PollUsed()
+		if !ok {
+			continue
+		}
+		println("phase2-virtionet-tx: sweep ", label, ": *** COMPLETION at spin=", uint64(spin),
+			"descIdx=", hex16(gotIdx), " ***")
+		_ = txq.Reclaim(gotIdx)
+		return
+	}
+	println("phase2-virtionet-tx: sweep ", label, ": no completion in 5000 polls; used[0..16]=")
+	dumpHexBytes("", txq.UsedHeaderBytes())
+}
+
+// dumpHexBytes prints a labeled byte slice as "label= 0xXX 0xXX ...".
+// Used by the R-M2c diagnostic so the host blkprintk-recover output
+// carries verbatim virtqueue memory snapshots.
+func dumpHexBytes(label string, b []byte) {
+	print("phase2-virtionet-tx:   ", label)
+	for _, v := range b {
+		print(" ", hex8(v))
+	}
+	print("\n")
 }
 
 // dumpFrame prints the first up-to-64 bytes of a received frame in

@@ -35,6 +35,18 @@ import (
 	"unsafe"
 )
 
+// VirtioDMAAddressCeiling is a defensive upper bound for virtqueue +
+// DMA buffer allocations made available to the R-M2c narrow campaign.
+// `AllocatePagesBelow(...,VirtioDMAAddressCeiling)` lets the probe
+// confirm whether the firmware-picked high-memory region (~ 0xef000000
+// on vfkit 0.6.3 / arm64) is a DMA-visible window or not. The R-M2c
+// live narrow tested both `0xFFFFFFFF` (no-op on VZ) and `0xBFFFFFFF`
+// (forces allocation into the 2 GiB RAM region) — neither shape made
+// the VZ TX path advance, so the production allocator stays on
+// `AllocatePages(AnyPages)`. Kept as a documented seam for the next
+// narrow if VZ behaviour drifts.
+const VirtioDMAAddressCeiling uint64 = 0xFFFFFFFF
+
 // NewVirtqueue allocates and zeroes the backing memory for a split
 // virtqueue of the given size, and returns a driver-side handle. The
 // caller next calls `cfg.SetQueueDesc/Driver/Device(q.BasePhys + offset)`

@@ -106,6 +106,44 @@ func AllocatePages(memoryType uint32, count uintptr) (uint64, error) {
 	return addr, nil
 }
 
+// AllocatePagesBelow allocates `count` 4 KiB pages of `memoryType` with
+// the firmware-chosen base address constrained to be at or below
+// `maxAddr`. Used by the M2 virtqueue + DMA path on Apple VZ where the
+// device's DMA window is below the firmware's conventional memory
+// ceiling. See R-M2c: VZ allocates Boot Services data in the
+// 0xe0000000+ range by default, which the VZ host doesn't back with
+// real RAM, so device-side DMA reads return zeros and the device
+// never observes the avail ring updates.
+//
+// `maxAddr` is the upper bound (inclusive); the firmware will return
+// pages with `base+count*EfiPageSize <= maxAddr`. EFI's
+// AllocateMaxAddress semantics (UEFI 2.10 §7.2.1): the IN/OUT Memory
+// arg is initialised to the requested ceiling and OUT'd as the
+// allocated base.
+func AllocatePagesBelow(memoryType uint32, count uintptr, maxAddr uint64) (uint64, error) {
+	bs := getBootServices()
+	if bs == 0 {
+		return 0, ErrNoBootServices
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	addr := maxAddr
+	status := efiCall(
+		bs+efiBSAllocatePages,
+		uint64(EFIAllocateMaxAddress),
+		uint64(memoryType),
+		uint64(count),
+		uint64(uintptr(unsafe.Pointer(&addr))),
+		0,
+		0,
+	)
+	if status != efiSuccess {
+		return 0, &EFIError{Status: status, Op: "AllocatePages (MaxAddress)"}
+	}
+	return addr, nil
+}
+
 // FreePages releases pages previously returned by AllocatePages. M2 does
 // NOT call this — virtqueues live for the duration of Boot Services
 // and the firmware reclaims them at ExitBootServices. M4 may wire it

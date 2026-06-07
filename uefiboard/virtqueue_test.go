@@ -292,3 +292,96 @@ func TestVirtqueue_AddBufferInvalidDescriptorIdx(t *testing.T) {
 		t.Errorf("writeDescriptor(5) on size=4: got %v, want ErrInvalidIdx", err)
 	}
 }
+
+// TestVirtqueue_DescBytes covers the R-M2c diagnostic accessor — fetch
+// the raw 16 bytes of a populated descriptor and confirm they match
+// the little-endian-packed (addr, len, flags, next) tuple. Also
+// verifies the out-of-range guard returns nil.
+func TestVirtqueue_DescBytes(t *testing.T) {
+	q, _ := newTestVirtqueue(t, 4, 0)
+	if err := q.writeDescriptor(2, 0x123456789abcdef0, 0xCAFE, VirtqDescFWrite, 0x55); err != nil {
+		t.Fatalf("writeDescriptor: %v", err)
+	}
+	got := q.DescBytes(2)
+	if len(got) != VirtqDescriptorSize {
+		t.Fatalf("DescBytes len: got %d, want %d", len(got), VirtqDescriptorSize)
+	}
+	if a := binary.LittleEndian.Uint64(got[0:8]); a != 0x123456789abcdef0 {
+		t.Errorf("addr: got 0x%x, want 0x123456789abcdef0", a)
+	}
+	if l := binary.LittleEndian.Uint32(got[8:12]); l != 0xCAFE {
+		t.Errorf("len: got 0x%x, want 0xCAFE", l)
+	}
+	if f := binary.LittleEndian.Uint16(got[12:14]); f != VirtqDescFWrite {
+		t.Errorf("flags: got 0x%x, want VirtqDescFWrite", f)
+	}
+	if n := binary.LittleEndian.Uint16(got[14:16]); n != 0x55 {
+		t.Errorf("next: got 0x%x, want 0x55", n)
+	}
+	// Out-of-range returns nil — never a partial copy.
+	if q.DescBytes(99) != nil {
+		t.Errorf("DescBytes(99) on size=4: want nil")
+	}
+}
+
+// TestVirtqueue_AvailHeaderBytes / TestVirtqueue_UsedHeaderBytes pin
+// the byte-level shape of the R-M2c side-channel dumps: flags + idx +
+// at least one ring entry per region, exactly 8 bytes for avail and
+// exactly 16 bytes for used.
+func TestVirtqueue_AvailHeaderBytes(t *testing.T) {
+	q, _ := newTestVirtqueue(t, 4, 0)
+	if _, err := q.AddBuffer(0, 0xABCD, 16, false); err != nil {
+		t.Fatalf("AddBuffer: %v", err)
+	}
+	got := q.AvailHeaderBytes()
+	if len(got) != 8 {
+		t.Fatalf("AvailHeaderBytes len: got %d, want 8", len(got))
+	}
+	// flags (2) + idx (2) + ring[0] (2) + ring[1] (2)
+	if idx := binary.LittleEndian.Uint16(got[2:4]); idx != 1 {
+		t.Errorf("idx after 1 AddBuffer: got %d, want 1", idx)
+	}
+	if ring0 := binary.LittleEndian.Uint16(got[4:6]); ring0 != 0 {
+		t.Errorf("ring[0]: got %d, want 0 (the only published descriptor idx)", ring0)
+	}
+}
+
+func TestVirtqueue_UsedHeaderBytes(t *testing.T) {
+	q, _ := newTestVirtqueue(t, 4, 0)
+	// Manually plant a used entry — simulate the device's publication.
+	u := q.usedSlice()
+	binary.LittleEndian.PutUint16(u[0:2], 0)      // flags = 0
+	binary.LittleEndian.PutUint16(u[2:4], 1)      // idx = 1
+	binary.LittleEndian.PutUint32(u[4:8], 0x42)   // ring[0].id = 0x42
+	binary.LittleEndian.PutUint32(u[8:12], 0x100) // ring[0].len = 0x100
+	got := q.UsedHeaderBytes()
+	if len(got) != 16 {
+		t.Fatalf("UsedHeaderBytes len: got %d, want 16", len(got))
+	}
+	if idx := binary.LittleEndian.Uint16(got[2:4]); idx != 1 {
+		t.Errorf("idx: got %d, want 1", idx)
+	}
+	if id := binary.LittleEndian.Uint32(got[4:8]); id != 0x42 {
+		t.Errorf("ring[0].id: got 0x%x, want 0x42", id)
+	}
+	if l := binary.LittleEndian.Uint32(got[8:12]); l != 0x100 {
+		t.Errorf("ring[0].len: got 0x%x, want 0x100", l)
+	}
+}
+
+// TestVirtqueue_UsedIdxRaw confirms the raw uint16 read of the used
+// ring's idx field agrees with the atomic-load path (UsedIdx). On
+// little-endian hosts these two paths must always agree; the
+// diagnostic dump uses divergence between them as a cache-coherency
+// canary.
+func TestVirtqueue_UsedIdxRaw(t *testing.T) {
+	q, _ := newTestVirtqueue(t, 4, 0)
+	u := q.usedSlice()
+	binary.LittleEndian.PutUint16(u[2:4], 0xABCD)
+	if got := q.UsedIdxRaw(); got != 0xABCD {
+		t.Errorf("UsedIdxRaw: got 0x%x, want 0xABCD", got)
+	}
+	if atom := q.UsedIdx(); atom != 0xABCD {
+		t.Errorf("UsedIdx (atomic): got 0x%x, want 0xABCD", atom)
+	}
+}

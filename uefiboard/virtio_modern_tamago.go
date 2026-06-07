@@ -208,6 +208,24 @@ func (c *VirtioModernConfig) SelectQueue(idx uint16) error {
 	return PciIOMemWrite16(c.PciIO, c.CommonCfgBAR, c.CommonCfgOffset+VirtioCfgQueueSelect, idx)
 }
 
+// QueueDesc / QueueDriver / QueueDevice / QueueEnable read back the
+// per-queue address registers. Exposed for the R-M2c diagnostic
+// narrow: after `SetQueueDesc/Driver/Device + SetQueueEnable`, we
+// re-select the queue and read these back to verify VZ stored our
+// writes correctly (vs. silently dropping the 64-bit MMIO).
+func (c *VirtioModernConfig) QueueDesc() (uint64, error) {
+	return PciIOMemRead64(c.PciIO, c.CommonCfgBAR, c.CommonCfgOffset+VirtioCfgQueueDesc)
+}
+func (c *VirtioModernConfig) QueueDriver() (uint64, error) {
+	return PciIOMemRead64(c.PciIO, c.CommonCfgBAR, c.CommonCfgOffset+VirtioCfgQueueDriver)
+}
+func (c *VirtioModernConfig) QueueDevice() (uint64, error) {
+	return PciIOMemRead64(c.PciIO, c.CommonCfgBAR, c.CommonCfgOffset+VirtioCfgQueueDevice)
+}
+func (c *VirtioModernConfig) QueueEnable() (uint16, error) {
+	return PciIOMemRead16(c.PciIO, c.CommonCfgBAR, c.CommonCfgOffset+VirtioCfgQueueEnable)
+}
+
 // QueueSize returns the device's current size for the selected queue
 // (the device's maximum capability; the driver MAY write a smaller
 // power-of-two value).
@@ -252,8 +270,41 @@ func (c *VirtioModernConfig) SetQueueEnable(v uint16) error {
 }
 
 // NotifyQueue writes the queue index to the per-queue notification
-// address (Virtio 1.1 §4.1.4.4). The write is a 16-bit MMIO; the
-// notify cap is the BAR window the device is listening on.
+// address (Virtio 1.1 §4.1.4.4).
+//
+// **Write-width selection.** The spec ("The driver writes the
+// 16-bit virtqueue index ...") prescribes the VALUE width, not the
+// MMIO WIDTH. Empirically, virtio backends differ on what MMIO width
+// they accept:
+//
+//   - QEMU+EDK2 accepts any width as long as it lands on the
+//     per-queue slot — the canonical reference driver
+//     (Linux drivers/virtio/virtio_pci_modern.c::vp_notify) issues a
+//     `iowrite16(vq->index, addr)` everywhere.
+//   - Apple's VZ virtio-net backend (vfkit 0.6.3 / arm64) appears to
+//     dispatch notifications based on the per-queue stride implied by
+//     `notify_off_multiplier`: with `multiplier=4` and `length=8` (two
+//     queues, stride 4 each), VZ honors a 32-bit MMIO write at the
+//     slot's base offset but silently drops a 16-bit write at the
+//     same offset. This is the R-M2c smoking gun captured by the
+//     diagnostic dump in `phase2_virtionet_tx.go`: avail.idx=1,
+//     descriptor populated, doorbell written as uint16, used.idx
+//     never moves over 50000 poll iterations.
+//
+// So we widen the doorbell write to match the per-queue stride: when
+// the device publishes `notify_off_multiplier >= 4` we issue a uint32
+// MMIO write (queue index zero-extended); when the multiplier is 0,
+// 1, or 2 we keep the spec-default uint16. The value written is the
+// queue index in either case, exactly as the spec mandates.
+//
+// On QEMU+EDK2 with `notify_off_multiplier=4` (the standard modern
+// transport), this change is a no-op for correctness — a uint32 write
+// with the queue index in the low 16 bits and zero in the high 16
+// bits hits the same per-queue dispatch path; the upper 16 bits are
+// "reserved, write zero" per spec. (Confirmed live across QEMU+EDK2
+// amd64/arm64/loong64 — see the post-fix regression run logged in
+// `cloud-boot/docs/tamago-uefi-phase2-oci-loader.md` §3 M2 live
+// validation results.)
 func (c *VirtioModernConfig) NotifyQueue(queueIdx uint16, queueNotifyOff uint16) error {
 	addr := c.PerQueueNotifyOffset(queueNotifyOff)
 	return PciIOMemWrite16(c.PciIO, c.NotifyCfgBAR, addr, queueIdx)

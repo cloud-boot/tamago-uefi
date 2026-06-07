@@ -193,3 +193,46 @@ func TestVirtioNetFeatureMTU(t *testing.T) {
 			VirtioNetFeatureMTU, uint64(1<<3))
 	}
 }
+
+// TestVirtioNetAcceptedFeaturesNarrow pins the R-M2c-wide accepted
+// mask: every bit Apple VZ offers (lo=0x300119ab hi=0x00000005)
+// EXCEPT VIRTIO_F_RING_PACKED (bit 34). The constant is used by the
+// `OpenVirtioNetWithFeatures` narrow probe in
+// `phase2_virtionet_tx.go`; widening it without the matching live
+// validation would mis-direct the next R-M2c iteration.
+func TestVirtioNetAcceptedFeaturesNarrow(t *testing.T) {
+	want := VirtioNetAcceptedFeatures |
+		(uint64(1) << 0) | (uint64(1) << 1) |
+		(uint64(1) << 7) | (uint64(1) << 8) |
+		(uint64(1) << 11) | (uint64(1) << 12) |
+		(uint64(1) << 28) | (uint64(1) << 29)
+	if VirtioNetAcceptedFeaturesNarrow != want {
+		t.Errorf("VirtioNetAcceptedFeaturesNarrow: got 0x%x, want 0x%x",
+			VirtioNetAcceptedFeaturesNarrow, want)
+	}
+	// Sanity: the narrow set MUST NOT include RING_PACKED (bit 34).
+	// The driver doesn't implement packed-ring semantics, and the
+	// device must stay in split-ring mode for this driver to work.
+	if VirtioNetAcceptedFeaturesNarrow&(uint64(1)<<34) != 0 {
+		t.Errorf("VirtioNetAcceptedFeaturesNarrow must NOT include VIRTIO_F_RING_PACKED (bit 34)")
+	}
+	// The narrow set is a SUPERSET of the standard mask — the
+	// standard cell can always be reproduced by intersecting the
+	// device's offer with the narrow set when the device doesn't
+	// offer the extra bits.
+	if VirtioNetAcceptedFeaturesNarrow&VirtioNetAcceptedFeatures != VirtioNetAcceptedFeatures {
+		t.Errorf("VirtioNetAcceptedFeaturesNarrow must be a superset of VirtioNetAcceptedFeatures")
+	}
+}
+
+// TestVirtioNetAcceptedFeaturesWithPacked confirms the diagnostic-only
+// "everything including RING_PACKED" mask is the narrow set ORed with
+// bit 34. Used by future R-M2c sub-narrows that want to probe whether
+// the device behaves differently when packed is acked.
+func TestVirtioNetAcceptedFeaturesWithPacked(t *testing.T) {
+	want := VirtioNetAcceptedFeaturesNarrow | (uint64(1) << 34)
+	if VirtioNetAcceptedFeaturesWithPacked != want {
+		t.Errorf("VirtioNetAcceptedFeaturesWithPacked: got 0x%x, want 0x%x",
+			VirtioNetAcceptedFeaturesWithPacked, want)
+	}
+}

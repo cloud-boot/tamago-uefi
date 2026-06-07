@@ -40,6 +40,20 @@ type VirtioNet struct {
 	txq *Virtqueue
 }
 
+// OpenVirtioNetWithFeatures drives the full bring-up of one virtio-net
+// device with a caller-supplied accepted-features override. The
+// override is applied AFTER the device's offered bitmap is read, so
+// the negotiated mask is `deviceFeats & overrideAcceptedFeatures`
+// (with VIRTIO_F_VERSION_1 and VIRTIO_NET_F_MAC requirements still
+// enforced).
+//
+// Used by the R-M2c narrow to test whether widening the accepted set
+// (e.g. acknowledging Apple's private bits 28/29) unblocks the TX
+// path on VZ.
+func OpenVirtioNetWithFeatures(pciIO uint64, overrideAcceptedFeatures uint64) (*VirtioNet, error) {
+	return openVirtioNetCore(pciIO, overrideAcceptedFeatures)
+}
+
 // OpenVirtioNet drives the full bring-up of one virtio-net device.
 // Caller has located the EFI_PCI_IO_PROTOCOL handle and verified
 // VID:DID = 1AF4:1041 (modern net).
@@ -48,6 +62,14 @@ type VirtioNet struct {
 // with VirtioNetRxRingSize buffers, txq is empty + ready, and MAC
 // is set.
 func OpenVirtioNet(pciIO uint64) (*VirtioNet, error) {
+	return openVirtioNetCore(pciIO, VirtioNetAcceptedFeatures)
+}
+
+// openVirtioNetCore is the body of OpenVirtioNet, parameterised on the
+// accepted-features mask. The mask MUST include VirtioFeatureVersion1
+// and VirtioNetFeatureMAC or AcceptFeatures will reject the
+// negotiation (those are M2's hard requirements).
+func openVirtioNetCore(pciIO uint64, acceptedFeatures uint64) (*VirtioNet, error) {
 	// Sanity-check that this really is a modern virtio-net device.
 	// The probe should have done this already; we double-check
 	// because OpenVirtioNet is the public API + a wrong DID here is
@@ -63,6 +85,21 @@ func OpenVirtioNet(pciIO uint64) (*VirtioNet, error) {
 	cfg, err := InitVirtioModernConfig(pciIO)
 	if err != nil {
 		return nil, err
+	}
+
+	// Step 0 — defensive PCI bus-master + memory enable.
+	// EFI_PCI_IO_PROTOCOL.Attributes(Enable, Memory | BusMaster)
+	// asserts the device-side BME bit so the device's DMA can flow.
+	// Live narrow finding (R-M2c, 2026-06-07): both QEMU+EDK2 and
+	// Apple VZ pre-enable these bits at firmware bind time, so this
+	// call is observed as a no-op on the canonical PCI command
+	// register read-back (`PciIOReadConfigU16(pciIO, PCICfgCommand)`
+	// returns `0x07` on QEMU+EDK2 and `0x16` on VZ both BEFORE and
+	// AFTER the call). Kept as a defensive guard for hypothetical
+	// future firmware that doesn't pre-enable; harmless when the
+	// bits are already set.
+	if attrErr := PciIOAttributesEnable(pciIO, EFIPciIOAttributeMemory|EFIPciIOAttributeBusMaster); attrErr != nil {
+		return nil, attrErr
 	}
 
 	// Step 1: full reset (write 0 to DeviceStatus).
@@ -91,9 +128,14 @@ func OpenVirtioNet(pciIO uint64) (*VirtioNet, error) {
 	if err != nil {
 		return nil, err
 	}
-	negotiated, err := AcceptFeatures(deviceFeats)
-	if err != nil {
-		return nil, err
+	// VERSION_1 + MAC remain hard requirements; otherwise we honour
+	// the caller-supplied accepted mask.
+	if deviceFeats&VirtioFeatureVersion1 == 0 {
+		return nil, ErrNotModernDevice
+	}
+	negotiated := deviceFeats & acceptedFeatures
+	if negotiated&VirtioNetFeatureMAC == 0 {
+		return nil, ErrNoMACFeature
 	}
 	if err := cfg.SetDriverFeatures64(negotiated); err != nil {
 		return nil, err
@@ -246,6 +288,14 @@ func (v *VirtioNet) fillRxRing() error {
 	return nil
 }
 
+// RxQueue / TxQueue expose the per-direction *Virtqueue handles. The
+// fields themselves stay unexported so callers can't reseat them; these
+// getters give the R-M2c diagnostic dump (and any future
+// observability surface) read-only access to descriptor / avail / used
+// ring bytes.
+func (v *VirtioNet) RxQueue() *Virtqueue { return v.rxq }
+func (v *VirtioNet) TxQueue() *Virtqueue { return v.txq }
+
 // TransmitFrame prepends a virtio_net_hdr to `frame`, allocates a
 // DMA-visible buffer, copies the header + payload in, enqueues it
 // on the txq, notifies the device, and polls the used ring for
@@ -273,8 +323,16 @@ func (v *VirtioNet) TransmitFrame(frame []byte) error {
 	if err := v.Cfg.NotifyQueue(VirtioNetTxQueueIdx, v.txq.NotifyOff); err != nil {
 		return err
 	}
-	// Poll for TX completion.
-	for spin := 0; spin < 10000; spin++ {
+	// Poll for TX completion. Budget bumped to 200000 from M2's
+	// initial 10000 — the R-M2c live narrow surfaced that even on
+	// QEMU+EDK2 amd64 a 10000-spin window can occasionally miss the
+	// device's used-ring publish under load (especially with the
+	// diagnostic side-channel tee writing to a virtio-blk scratch
+	// disk between TX submissions). 200000 polls is still a small
+	// fraction of a second of wall-clock; the device's true
+	// round-trip on a healthy QEMU host is in the microseconds, so
+	// no real-world workload should see this budget exhaust.
+	for spin := 0; spin < 200000; spin++ {
 		gotIdx, _, ok := v.txq.PollUsed()
 		if !ok {
 			continue

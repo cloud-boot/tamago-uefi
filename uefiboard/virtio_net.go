@@ -124,6 +124,48 @@ const VirtioNetTxRingSize uint16 = 8
 // is a no-op there.
 const VirtioNetAcceptedFeatures uint64 = VirtioNetFeatureMTU | VirtioNetFeatureMAC | VirtioNetFeatureStatus | VirtioFeatureVersion1
 
+// R-M2c narrow probe constant. To verify whether Apple VZ requires
+// extra feature bits beyond the R-M2b mask to actually run TX, we
+// temporarily widen the accepted mask to include EVERYTHING VZ offers
+// except VIRTIO_F_RING_PACKED (bit 34). The R-M2b narrow established
+// that this mask makes FEATURES_OK stick on VZ; the R-M2c question is
+// whether it also unblocks TX.
+//
+// Bits added beyond `VirtioNetAcceptedFeatures` (VZ offered = lo
+// 0x300119ab, hi 0x00000005):
+//   bit  0  VIRTIO_NET_F_CSUM
+//   bit  1  VIRTIO_NET_F_GUEST_CSUM
+//   bit  7  VIRTIO_NET_F_GUEST_TSO4
+//   bit  8  VIRTIO_NET_F_GUEST_TSO6
+//   bit 11  VIRTIO_NET_F_HOST_TSO4
+//   bit 12  VIRTIO_NET_F_HOST_TSO6
+//   bit 28  (Apple-private / unassigned in Virtio 1.1)
+//   bit 29  (Apple-private / unassigned in Virtio 1.1)
+//
+// Bit 34 (RING_PACKED) is intentionally NOT acknowledged — accepting
+// it would force the driver onto the packed-ring layout, which M2
+// doesn't implement.
+//
+// On QEMU+EDK2 the device-offered set lacks bits 28/29 entirely, so
+// `deviceFeats & VirtioNetAcceptedFeaturesNarrow` collapses to the
+// standard QEMU mask (`MAC | STATUS | VERSION_1`) and the four
+// PASS cells stay unchanged.
+const VirtioNetAcceptedFeaturesNarrow uint64 = VirtioNetAcceptedFeatures |
+	(1 << 0) | (1 << 1) |
+	(1 << 7) | (1 << 8) |
+	(1 << 11) | (1 << 12) |
+	(1 << 28) | (1 << 29)
+
+// VirtioNetAcceptedFeaturesWithPacked is the "absolutely everything VZ
+// offers including RING_PACKED" mask. Used by the R-M2c narrow only
+// to test whether VZ accepts the packed-ring negotiation at all (if
+// FEATURES_OK sticks with bit 34 set, the device offered packed
+// honestly; if FEATURES_OK clears, it offered packed but doesn't
+// actually want it). The M2 driver does NOT implement packed-ring
+// semantics, so this mask is a diagnostic probe, never a production
+// configuration.
+const VirtioNetAcceptedFeaturesWithPacked uint64 = VirtioNetAcceptedFeaturesNarrow | (1 << 34)
+
 // VirtioNetHdr is the Go view of `struct virtio_net_hdr` (Virtio 1.1
 // §5.1.6.1). M2 always emits an all-zero header and ignores the
 // received one (no checksum offload, no GSO).

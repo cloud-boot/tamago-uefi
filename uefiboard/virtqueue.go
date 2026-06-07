@@ -420,3 +420,51 @@ func (q *Virtqueue) LastSeenUsedIdx() uint16 { return q.lastSeenUsedIdx }
 // NextAvailIdx returns the driver's view of the available-ring
 // index. Exposed for tests + diagnostics.
 func (q *Virtqueue) NextAvailIdx() uint16 { return q.nextAvailIdx }
+
+// DescBytes returns the first 16 bytes of descriptor[idx] as a freshly
+// allocated slice. Exposed for the R-M2c diagnostic dump.
+func (q *Virtqueue) DescBytes(idx uint16) []byte {
+	if idx >= q.Layout.Size {
+		return nil
+	}
+	d := q.descSlice()
+	off := int(idx) * VirtqDescriptorSize
+	out := make([]byte, VirtqDescriptorSize)
+	copy(out, d[off:off+VirtqDescriptorSize])
+	return out
+}
+
+// AvailHeaderBytes returns the first 8 bytes of the avail-ring region
+// (flags, idx, ring[0]). Exposed for diagnostic dumps.
+func (q *Virtqueue) AvailHeaderBytes() []byte {
+	a := q.availSlice()
+	out := make([]byte, 8)
+	if len(a) < 8 {
+		copy(out, a)
+		return out
+	}
+	copy(out, a[:8])
+	return out
+}
+
+// UsedHeaderBytes returns the first 16 bytes of the used-ring region
+// (flags, idx, ring[0..0]). Exposed for diagnostic dumps.
+func (q *Virtqueue) UsedHeaderBytes() []byte {
+	u := q.usedSlice()
+	out := make([]byte, 16)
+	if len(u) < 16 {
+		copy(out, u)
+		return out
+	}
+	copy(out, u[:16])
+	return out
+}
+
+// UsedIdxRaw returns the raw bytes of the used-ring idx field
+// (offset 2..4 — two bytes) without going through the atomic.LoadUint32
+// path. Useful for cross-checking the atomic load against the raw
+// memory view in case of cache-coherency questions on arm64.
+func (q *Virtqueue) UsedIdxRaw() uint16 {
+	u := q.usedSlice()
+	return binary.LittleEndian.Uint16(u[2:4])
+}
