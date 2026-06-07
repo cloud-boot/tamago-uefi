@@ -573,6 +573,96 @@ tasks:
       - task: virtionet:efi:riscv64
       - task: virtionet:efi:loong64
 
+  # Phase-2 M2-B probe builds — same pipeline as M2 (PCI + SNP +
+  # Block IO side-channel) but with `phase2_virtionet_postebs_tx`
+  # INSTEAD of `phase2_virtionet_tx`. M2-B captures the virtio-net
+  # state pre-ExitBootServices, crosses EBS, then re-drives the
+  # device through direct MMIO from bare metal. The R-M2c Option B
+  # narrow — see cloud-boot/docs/tamago-uefi-phase2-oci-loader.md
+  # §3 M2 for the diagnostic that motivated this branch.
+  #
+  # Outputs go to BOOT<ARCH>-VIRTIONETB.EFI so they're separately
+  # bootable from the standard M2 binaries.
+  postebs:elf:amd64:
+    desc: 'Build app_amd64_postebs.elf (TamaGo PIE, M2-B + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_postebs_tx -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_postebs.elf .'
+
+  postebs:elf:arm64:
+    desc: 'Build app_arm64_postebs.elf (TamaGo PIE, M2-B + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_postebs_tx -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_postebs.elf .'
+
+  postebs:elf:riscv64:
+    desc: 'Build app_riscv64_postebs.elf (TamaGo PIE, M2-B + M1.5/M1.6 tags; riscv64 surfaces "no virtio-net" cleanly per §3 M2).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_postebs_tx -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_postebs.elf .'
+
+  postebs:elf:loong64:
+    desc: 'Build app_loong64_postebs.elf (TamaGo PIE, M2-B + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_virtionet_postebs_tx -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_postebs.elf .'
+
+  postebs:efi:amd64:
+    desc: 'Build Phase-2 M2-B BOOTX64-VIRTIONETB.EFI (post-EBS virtio-net probe).'
+    deps: [postebs:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-VIRTIONETB.EFI" "{{.TASKFILE_DIR}}/app_amd64_postebs.elf"'
+
+  postebs:efi:arm64:
+    desc: 'Build Phase-2 M2-B BOOTAA64-VIRTIONETB.EFI (post-EBS virtio-net probe).'
+    deps: [postebs:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-VIRTIONETB.EFI" "{{.TASKFILE_DIR}}/app_arm64_postebs.elf"'
+
+  postebs:efi:riscv64:
+    desc: 'Build Phase-2 M2-B BOOTRISCV64-VIRTIONETB.EFI (post-EBS virtio-net probe; expected to surface "no virtio-net" per §3 M2).'
+    deps: [postebs:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-VIRTIONETB.EFI" "{{.TASKFILE_DIR}}/app_riscv64_postebs.elf"'
+
+  postebs:efi:loong64:
+    desc: 'Build Phase-2 M2-B BOOTLOONGARCH64-VIRTIONETB.EFI (post-EBS virtio-net probe).'
+    deps: [postebs:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-VIRTIONETB.EFI" "{{.TASKFILE_DIR}}/app_loong64_postebs.elf"'
+
+  postebs:all:
+    desc: 'Build all four Phase-2 M2-B post-EBS virtio-net probe EFIs.'
+    cmds:
+      - task: postebs:efi:amd64
+      - task: postebs:efi:arm64
+      - task: postebs:efi:riscv64
+      - task: postebs:efi:loong64
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -593,9 +683,11 @@ tasks:
       - rm -f app_amd64_pcisnp.elf app_arm64_pcisnp.elf app_riscv64_pcisnp.elf app_loong64_pcisnp.elf
       - rm -f app_amd64_blkprintk.elf app_arm64_blkprintk.elf app_riscv64_blkprintk.elf app_loong64_blkprintk.elf
       - rm -f app_amd64_virtionet.elf app_arm64_virtionet.elf app_riscv64_virtionet.elf app_loong64_virtionet.elf
+      - rm -f app_amd64_postebs.elf app_arm64_postebs.elf app_riscv64_postebs.elf app_loong64_postebs.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
       - rm -f BOOTX64-PCISNP.EFI BOOTAA64-PCISNP.EFI BOOTRISCV64-PCISNP.EFI BOOTLOONGARCH64-PCISNP.EFI
       - rm -f BOOTX64-BLKPRINT.EFI BOOTAA64-BLKPRINT.EFI BOOTRISCV64-BLKPRINT.EFI BOOTLOONGARCH64-BLKPRINT.EFI
       - rm -f BOOTX64-VIRTIONET.EFI BOOTAA64-VIRTIONET.EFI BOOTRISCV64-VIRTIONET.EFI BOOTLOONGARCH64-VIRTIONET.EFI
+      - rm -f BOOTX64-VIRTIONETB.EFI BOOTAA64-VIRTIONETB.EFI BOOTRISCV64-VIRTIONETB.EFI BOOTLOONGARCH64-VIRTIONETB.EFI
