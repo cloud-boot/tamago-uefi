@@ -1,7 +1,8 @@
-// cloud-boot — TamaGo amd64 UEFI Phase-0 proof of life.
+// cloud-boot — TamaGo UEFI Phase-1 proof of life (multi-arch).
 //
 // A pure-Go bare-metal UEFI application built on the standard Go runtime
-// via TamaGo (GOOS=tamago GOARCH=amd64). It uses cloud-boot's OWN UEFI
+// via TamaGo (GOOS=tamago, GOARCH=amd64/arm64/loong64/riscv64). It uses
+// cloud-boot's OWN UEFI
 // board (package uefiboard) — NOT go-boot — for the firmware entry, the
 // MS x64 service-call thunk, and ConOut wiring. This first milestone only
 // proves the entry + runtime bring-up + console: it prints over the UEFI
@@ -15,8 +16,8 @@ import (
 )
 
 func main() {
-	println("hello from cloud-boot tamago/amd64 UEFI board")
-	println("runtime:", runtime.Version(), "GOOS=tamago GOARCH=amd64")
+	println("hello from cloud-boot tamago/" + runtime.GOARCH + " UEFI board")
+	println("runtime:", runtime.Version(), "GOOS="+runtime.GOOS+" GOARCH="+runtime.GOARCH)
 
 	// goroutine + channel smoke test (proves the real scheduler is up,
 	// the whole point of TamaGo over TinyGo).

@@ -17,44 +17,54 @@ proves firmware entry, runtime bring-up and console on the real Go runtime
 | arch | toolchain PIE | board files | builds | image loads | runtime bring-up | hello |
 | --- | --- | --- | --- | --- | --- | --- |
 | **amd64** | ✅ | ✅ | ✅ | ✅ (OVMF q35) | ✅ | **✅** |
-| **arm64** | ✅ | ✅ | ✅ | ✅ (AAVMF virt) | ⚠️ fault in `schedinit` (see below) | ❌ |
+| **arm64** | ✅ | ✅ | ✅ | ✅ (AAVMF virt) | ✅ | **✅** |
 | **riscv64** | ✅ | ✅ | ✅ | ⚠️ firmware fault during image protection (see below) | ❌ | ❌ |
-| **loong64** | ✅ | ✅ | ✅ | ✅ (EDK2 LoongArch virt) | ⚠️ silent hang past `cpuinit` marker (see below) | ❌ |
+| **loong64** | ✅ | ✅ | ✅ | ✅ (EDK2 LoongArch virt) | ✅ | **✅** |
 
-The arm64 leg's `cpuinit` shim runs to completion (verified with serial
-markers on the QEMU virt PL011) and the firmware loads/starts the image.
-A focused debug pass — temporary PL011 marker writes after each `BL` in
-`sys_tamago_arm64.s` plus markers around `goos.Hwinit0()` in
-`runtime.hwinit0` — pinned the bring-up failure down to two distinct
-issues:
+The arm64 and loong64 legs both reach the `main` hello print and the
+goroutine-channel smoke test the same way amd64 does (verified under
+`-nographic` boot with `qemu-system-aarch64`/`qemu-system-loongarch64`
+against the pkgx-pinned `edk2-stable202408` firmware).
 
-1. **Framework `arm64.Init()` is incompatible with UEFI.** Despite being
-   named `Init()` (and exposed as `runtime/goos.Hwinit0` via linkname),
-   the framework function calls `cpu.InitMMU()`, which builds new EL1
-   page tables on the bare-metal assumption that "all memory is mapped as
-   device memory at start". Under UEFI the firmware has already
-   identity-mapped RAM (Normal/Cacheable) + MMIO (Device) — rebuilding
-   the MMU clobbers those mappings and the bring-up never returns.
-   Worked around by patching the local clone of
-   `github.com/usbarmory/tamago/arm64/init.go` to skip the `InitMMU()`
-   call. **TODO upstream**: gate it behind a build tag (e.g.
-   `!linkhwinit0`, mirroring `!linkcpuinit`/`!linkramstart`) so consumers
-   like `tamago-uefi` can opt out without forking the framework.
+Two issues blocked bring-up earlier, both resolved:
 
-2. **`runtime.schedinit` triggers a permission fault.** With (1) worked
-   around, the runtime progresses through `hwinit0` → `check` →
-   `osinit` and faults inside `schedinit`: ESR=`0x9600004F`
-   (EC 0x25, ISS 0x4F = *Data abort: Permission fault, third level*) at
-   FAR=`0x13C69D000`. The faulting address sits in a page the UEFI
-   image-protection policy mapped read-only (likely an image data region
-   that EDK2 marks RO at load time); the runtime tries to write there
-   during scheduler init. Closing this needs either a UEFI-aware MMU
-   re-map (analogue of `InitMMU()` that preserves firmware's MMIO
-   mappings) or an image-protection-policy adjustment.
+1. **Framework `arm64.Init()` was incompatible with UEFI.** The
+   framework function (linkname'd `runtime/goos.Hwinit0`) called
+   `cpu.InitMMU()`, which builds new EL1 page tables on the bare-metal
+   assumption that "all memory is mapped as device memory at start".
+   Under UEFI the firmware has already identity-mapped RAM
+   (Normal/Cacheable) + MMIO (Device) — rebuilding the MMU clobbered
+   those mappings and the bring-up never returned. Fix: the board no
+   longer imports the framework's arm64 package at all; it implements
+   the small set of hooks it needs (Nanotime via the Generic Timer
+   CSRs, RamSize, RamStackOffset, RNG, empty Hwinit0/1) directly in
+   `board_arm64.go` + `board_arm64.s`. Same shape as the riscv64 leg.
 
-Treat arm64 as Phase 1.5; the toolchain, packaging and entry shim are all
-in place. Closing the remaining schedinit perm-fault is the last
-blocker, and it's bounded — single page, single PC, well-characterised.
+2. **Heap allocation crashed the very first sbrk pass with a
+   permission fault.** The earlier shim set `goos.RamStart = &runtime.text + 2 MiB`
+   and left `goos.Bloc` unset, so the runtime's sbrk allocator
+   defaulted `bloc = firstmoduledata.end` (mid-`.data` BSS) and grew
+   upward. Once it crossed the end of our PE image into the
+   adjacent page, it tripped an L3 permission fault (ESR `0x9600004F`
+   = *Data abort, permission fault level 3*, FAR one page past
+   `SizeOfImage`). EDK2 marks unrelated firmware modules' `.text` RO
+   and they happen to be packed right after ours by AllocateAnyPages,
+   so the page next to us is generically unsafe. Fix: cpuinit_arm64.s
+   now calls `gBS->AllocatePages(AllocateAnyPages, EfiLoaderData, RamSize/4096, &heapBase)`
+   to obtain a guaranteed-writable contiguous chunk, sets
+   `goos.RamStart = goos.Bloc = heapBase`, points SP at its top, and
+   only then enters `_rt0_tamago_start`. The runtime never touches
+   memory outside that chunk.
+
+The loong64 leg had the same root cause for its silent-hang state
+(heap memclr running into adjacent RO pages); the same AllocatePages
+fix in `cpuinit_loong64.s` resolved it. The 'A' UART marker still
+fires; the runtime then proceeds all the way to the goroutine sum and
+DONE prints over ConOut. The previously-feared "csrwr R19, EUEN"
+instruction-non-defined exception did NOT recur in the final
+configuration — empirically firmware *does* hand us a disabled FPU,
+re-arming it via `csrwr R19, 0x2` (CSR.EUEN.FPE) is required and
+works.
 
 The **riscv64** leg is in Phase 1.5 too, but blocks earlier than arm64:
 the toolchain emits a correct PIE ELF (`.rela` populated with
@@ -113,50 +123,27 @@ These local additions are NOT pushed upstream. Track upstream:
 [`usbarmory/tamago-go#17`](https://github.com/usbarmory/tamago-go/pull/17),
 [`usbarmory/tamago#70`](https://github.com/usbarmory/tamago/issues/70).
 
-The bring-up status is the same Phase-1.5 shape as arm64:
+The bring-up status is now the same as arm64 — end-to-end:
 
 1. **Toolchain + PE wrapping work end-to-end.** A 1.6 MB TamaGo
-   loong64 PIE (`ET_DYN`, 3832 `R_LARCH_RELATIVE` relocs) round-trips
+   loong64 PIE (`ET_DYN`, ~3800 `R_LARCH_RELATIVE` relocs) round-trips
    through `pectl link-pie` to a 1.1 MB `BOOTLOONGARCH64.EFI`
-   (PE32+, machine `0x6264`, subsystem 10, 3844 `IMAGE_REL_BASED_DIR64`
+   (PE32+, machine `0x6264`, subsystem 10, ~3800 `IMAGE_REL_BASED_DIR64`
    base relocs). EDK2 LoongArch under QEMU `virt -cpu max -m 4096`
    loads the image and transfers control to our `cpuinit`.
 
-2. **`cpuinit` runs end-to-end** — verified by an `'A'` marker written
-   to the QEMU virt ns16550a UART (`THR @ 0x1FE001E0`) at the very top
-   of `cpuinit_loong64.s`. ImageHandle, SystemTable, ConOut are
-   captured; `RamStart = &runtime.text + 2 MiB`; `R3` (SP) = top of RAM
-   minus the stack window; tail-call to `_rt0_tamago_start`.
+2. **`cpuinit_loong64.s` allocates a heap chunk via Boot Services.**
+   The 'A' UART marker fires first (`THR @ 0x1FE001E0`), then the
+   shim captures ImageHandle/SystemTable/ConOut, calls
+   `gBS->AllocatePages(AllocateAnyPages, EfiLoaderData,
+   RamSize/4096, &heapBase)`, re-arms `CSR.EUEN.FPE` (the EDK2
+   LoongArch boot env hands us a disabled FPU), and points SP at
+   `heapBase + RamSize - StackOffset`. Tail-call to
+   `_rt0_tamago_start`.
 
-3. **`csrwr R19, EUEN` aborts boot.** An explicit re-arm of
-   `CSR.EUEN.FPE` (instruction `0x04000833`) at the end of `cpuinit`
-   throws a fatal `ESTAT.Ecode=0x0D` (*Instruction Non-Defined*)
-   exception under EDK2 LoongArch — `ERA=0`, firmware prints
-   "Can't find image information" and halts. Empirically the firmware
-   leaves the FPU **on** for us, so the workaround is to simply omit
-   the csrwr (same shape as the arm64 SCTLR/CPACR skip). Documented in
-   the file header.
-
-4. **Silent hang past `cpuinit`.** With the EUEN write removed, the
-   PE entry runs to completion and `JMP _rt0_tamago_start` transfers
-   control to the runtime. From there the UART falls silent (the
-   runtime uses ConOut, not UART, so without progress we get nothing
-   on either) until QEMU is terminated. This matches the arm64
-   Phase-1.5 shape: the runtime is reached and bring-up gets at least
-   partway through `hwinit0` / `check` / `osinit` / `schedinit`, but
-   never produces a `println` byte through ConOut. The arm64 root
-   cause was a UEFI image-protection .reloc page-permission fault in
-   `schedinit`; the loong64 leg almost certainly hits the same kind of
-   issue (the `RamStart = text + 2 MiB` workaround the arm64 leg uses
-   for that is already applied here as a preemptive measure, but a
-   second-order .reloc page in a different layout could still bite).
-
-Closing this needs the same kind of focused debug pass arm64 needs:
-PL011/UART marker writes after each `JAL` in `sys_tamago_loong64.s`
-plus markers around `goos.Hwinit0()` in `runtime.hwinit0`, and likely
-also a real `exception.s` that catches the bring-up fault on the
-LoongArch side instead of letting EDK2's firmware vectors silently
-eat it.
+3. **Runtime reaches `main` and prints over ConOut.** The 'A' marker
+   is followed by the standard hello banner, the goroutine-channel
+   sum, and `DONE`. Same shape as arm64 and amd64.
 
 ### Upstream PRs that would close gaps
 
@@ -169,9 +156,10 @@ eat it.
 - A small `peln` improvement (track in
   [`go-coff/peln`](https://github.com/go-coff/peln)) to surface load-bias
   diagnostics on `loongarch64` would have shortened our debug.
-- A framework-side `!linkhwinit0` build tag (or equivalent) gating
-  `arm64.Init()`'s `InitMMU()` call — same TODO already noted for
-  arm64, applies equally to loong64.
+- A framework-side `!linkhwinit0` build tag gating `arm64.Init()`'s
+  `InitMMU()` call — would let UEFI consumers reuse the framework's
+  arm64 CPU package without forking. The cloud-boot board sidesteps
+  this by simply not importing the framework's arm64 package.
 
 ## Our own UEFI board (`uefiboard/`)
 
@@ -186,16 +174,18 @@ arch-neutral core plus per-arch entry shims and Go hooks.
 | `cpuinit_amd64.s` | PE entry (MS x64 ABI: `RCX`=ImageHandle, `RDX`=SystemTable), SSE enable, RamStart, hand-off to `runtime.rt0_amd64_tamago` | amd64 |
 | `eficall_amd64.s` | MS x64 thunk: `RCX/RDX/R8/R9` args, 32-byte shadow space, indirect `CALL (AX)` | amd64 |
 | `board_amd64.go` | `CPU = &amd64.CPU{}`, `Nanotime`, `Hwinit1`, `RamSize=704 MiB` | amd64 |
-| `cpuinit_arm64.s` | PE entry (AAPCS64: `X0`=ImageHandle, `X1`=SystemTable), `SCTLR_EL1.A` clear, `CPACR_EL1.FPEN`, RamStart, hand-off to `_rt0_tamago_start` | arm64 |
+| `cpuinit_arm64.s` | PE entry (AAPCS64: `X0`=ImageHandle, `X1`=SystemTable), `gBS->AllocatePages` for heap, `SCTLR_EL1.A` clear, `CPACR_EL1.FPEN`, RamStart, hand-off to `_rt0_tamago_start` | arm64 |
 | `eficall_arm64.s` | AAPCS64 thunk: `X0..X3` args, no shadow space, indirect `BL (R9)` | arm64 |
-| `board_arm64.go` | `CPU = &arm64.CPU{}`, `Nanotime`, `Hwinit1` (no-op under UEFI), `RamSize=32 MiB`, `RamStackOffset`, RNG stubs | arm64 |
-| `cpuinit_riscv64.s` | PE entry (LP64: `A0`=ImageHandle, `A1`=SystemTable), `SSTATUS.FS=Initial` for FPU, RamStart, hand-off to `_rt0_tamago_start` | riscv64 |
+| `board_arm64.go` | Self-contained (no framework arm64 import), `Nanotime` via CNTPCT_EL0 / CNTFRQ_EL0, `Hwinit0/1` (no-op under UEFI), `RamSize=32 MiB`, `RamStackOffset`, RNG stubs | arm64 |
+| `board_arm64.s` | `rdcntpct()` / `rdcntfrq()` via `MRS CNTPCT_EL0` / `MRS CNTFRQ_EL0` | arm64 |
+| `cpuinit_riscv64.s` | PE entry (LP64: `A0`=ImageHandle, `A1`=SystemTable), `gBS->AllocatePages` for heap, `SSTATUS.FS=Initial` for FPU, RamStart, hand-off to `_rt0_tamago_start` | riscv64 |
 | `eficall_riscv64.s` | LP64 thunk: `A0..A3` args, no shadow space, indirect `JALR (T1)` | riscv64 |
 | `board_riscv64.go` | self-contained (no framework dep), `Nanotime` via `rdtime` (TIME CSR), `Hwinit0/1` no-ops under UEFI, `RamSize=32 MiB`, `RamStackOffset`, xorshift RNG stubs | riscv64 |
 | `board_riscv64.s` | `rdtime()` via raw `csrrs t0, time, zero` (`WORD $0xc01022f3`) | riscv64 |
-| `cpuinit_loong64.s` | PE entry (LoongArch LP64: `R4`=ImageHandle, `R5`=SystemTable), early `'A'` UART marker, RamStart, hand-off to `_rt0_tamago_start`. FPU csrwr deliberately omitted (firmware leaves EUEN.FPE set; an explicit re-arm throws INE) | loong64 |
+| `cpuinit_loong64.s` | PE entry (LoongArch LP64: `R4`=ImageHandle, `R5`=SystemTable), early `'A'` UART marker, `gBS->AllocatePages` for heap, `csrwr CSR.EUEN.FPE`, RamStart, hand-off to `_rt0_tamago_start` | loong64 |
 | `eficall_loong64.s` | LoongArch LP64 thunk: `R4..R7` args, no shadow space, indirect `JAL (R13)` via `R23`-stashed RA | loong64 |
-| `board_loong64.go` | `CPU = &loong64.CPU{}`, `Nanotime` via stable-timer, `Hwinit1 = CPU.InitTimer()` only (skip framework `CPU.Init()` for the UEFI/firmware-vector reasons), `RamSize=64 MiB`, `RamStackOffset`, RNG via the framework's stable-timer-seeded splitmix64 | loong64 |
+| `board_loong64.go` | Self-contained (no framework loong64 import), `Nanotime` via stable-timer + CPUCFG, `Hwinit0/1` (no-op under UEFI), `RamSize=64 MiB`, `RamStackOffset`, splitmix64 RNG seeded from the stable-timer | loong64 |
+| `board_loong64.s` | `rdStableCounter()` / `rdCPUCFG()` via `RDTIMED` / `CPUCFG` | loong64 |
 
 Built with `-tags linkcpuinit,linkramstart`: these exclude the framework's
 bare-metal `cpuinit` (so ours wins) and, on amd64, the framework's
@@ -265,13 +255,11 @@ DONE
 
 ## Follow-ups
 
-- Finish arm64 runtime bring-up under UEFI (Phase 1.5).
 - Get past the riscv64 firmware fault either by upgrading the bundled
   `edk2-riscv` snapshot (current pkgx pin is `edk2-stable202408`, which
   reproduces the `SetUefiImageMemoryAttributes` fault) or by booting
   through systemd-stub on a kernel rather than as a bare EFI app.
-- Finish loong64 runtime bring-up: same `JAL`/Hwinit0 marker pass arm64
-  needs, plus upstreaming the local `usbarmory/tamago/loong64/` package
+- Upstream the local `usbarmory/tamago/loong64/` package
   (cf. `usbarmory/tamago#70`) and the toolchain port
   (cf. `usbarmory/tamago-go#17`). The cloud-boot-local PIE overlay
   (`tamago-loong64-pie.patch`) stays out of the upstream PR per the

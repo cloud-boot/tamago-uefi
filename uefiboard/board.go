@@ -29,6 +29,17 @@ var (
 	conOut      uint64 // EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL*, set in cpuinit_<arch>.s
 )
 
+// heapBase is the in/out pointer slot for EFI_BOOT_SERVICES->AllocatePages.
+// The per-arch cpuinit shim passes &heapBase to AllocatePages; firmware
+// writes the allocated physical-address base back into it, then cpuinit
+// reads it to set goos.RamStart and goos.Bloc. Storing it as a package
+// variable keeps it in our writable .data section (XP+RW under UEFI image
+// protection on every platform we target), which AllocatePages requires.
+//
+// Initialised to 0 at link time; the value is meaningful only after the
+// AllocatePages call returns success.
+var heapBase uint64
+
 // RamStart placeholder. The real value is written by the per-arch cpuinit
 // shim (RamStart = &runtime.text - 64 KiB, so the runtime tracks wherever
 // firmware loaded the image). Declared here unconditionally because

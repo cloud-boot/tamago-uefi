@@ -1,12 +1,10 @@
 // cloud-boot UEFI board — loong64-specific Go hooks.
 //
-// Uses the TamaGo framework's loong64 CPU package (staged locally in
-// usbarmory/tamago/loong64/, pending upstream usbarmory/tamago#70 and
-// usbarmory/tamago-go#17 — see README) for the stable-timer based
-// Nanotime and the empty Hwinit0 stub. Like arm64 and riscv64, the
-// framework's loong64 package does NOT export RamStackOffset or an
-// RNG, so the board provides them here. The firmware entry + ABI
-// thunk live in cpuinit_loong64.s / eficall_loong64.s.
+// Self-contained on loong64 (does NOT import the cloud-boot-local
+// framework loong64 package), for the same reason board_arm64.go is:
+// the framework's `loong64.Init` is linknamed `runtime/goos.Hwinit0`
+// and would conflict with the board's own Hwinit0. We supply our
+// own here, plus Nanotime via the stable-timer / CPUCFG path.
 
 //go:build tamago && loong64
 
@@ -14,58 +12,99 @@ package uefiboard
 
 import (
 	_ "unsafe"
-
-	"github.com/usbarmory/tamago/loong64"
 )
 
-// CPU is this board's processor instance (stable-timer state).
-//
-// UEFI on LoongArch already ran the platform in PLV0 with the MMU,
-// interrupt controller and stable-timer up, so Hwinit1 only needs the
-// (light) TamaGo-side init for the counter frequency (so Nanotime
-// returns nanoseconds rather than raw ticks).
-var CPU = &loong64.CPU{}
-
-// RamSize: 64 MiB. On loongarch64-virt the firmware places the image
-// somewhere in the installed RAM region (QEMU -m 4096); 64 MiB above
-// the image base safely fits the heap arena for the hello PoC. Replace
-// with a UEFI memory-map reconciliation post-World for a real loader.
+// RamSize: 64 MiB. cpuinit_loong64.s passes (RamSize >> 12) as the page
+// count to gBS->AllocatePages and points goos.RamStart / goos.Bloc at
+// the returned base. 64 MiB safely fits in QEMU virt -m 4096.
 //
 //go:linkname ramSize runtime/goos.RamSize
 var ramSize uint64 = 0x04000000
 
-//go:linkname nanotime runtime/goos.Nanotime
-func nanotime() int64 {
-	return CPU.GetTime()
-}
-
-//go:linkname hwinit1 runtime/goos.Hwinit1
-func hwinit1() {
-	// Skip framework loong64.CPU.Init() on UEFI: it touches CSR state
-	// (Exit/Idle hooks) that is fine, but in a more complete framework
-	// version it would also re-program CSR.EENTRY, CSR.ECFG and the
-	// exception vector — all of which would clobber firmware's vectors
-	// that we still depend on for any synchronous exception during
-	// bring-up.
-	//
-	// We DO want the timer multiplier programmed so nanotime() returns
-	// nanoseconds rather than raw stable-timer ticks; do that part
-	// explicitly here.
-	CPU.InitTimer()
-}
-
 // Framework loong64 has no RamStackOffset linkname; declare it here.
-// 1 MiB stack window matches the amd64 / arm64 / riscv64 defaults.
+// 1 MiB stack window matches the arm64/amd64/riscv64 defaults.
 //
 //go:linkname ramStackOffset runtime/goos.RamStackOffset
 var ramStackOffset uint64 = 0x100000
 
+// rdStableCounter reads the LoongArch stable-timer counter via RDTIME.D
+// (defined in board_loong64.s).
+func rdStableCounter() int64
+
+// rdCPUCFG returns CPUCFG[reg] (defined in board_loong64.s).
+func rdCPUCFG(reg uint32) uint32
+
+// counterFreq derives the stable-timer frequency in Hz from CPUCFG
+// words 4 and 5: freq = word4 * (word5 & 0xffff) / (word5 >> 16).
+// Falls back to QEMU virt's 100 MHz default when CPUCFG reports 0.
+func counterFreq() int64 {
+	base := int64(rdCPUCFG(4))
+	if base == 0 {
+		return 100_000_000
+	}
+	cfg5 := rdCPUCFG(5)
+	mul := int64(cfg5 & 0xffff)
+	div := int64((cfg5 >> 16) & 0xffff)
+	if mul == 0 || div == 0 {
+		return base
+	}
+	return base * mul / div
+}
+
+//go:linkname hwinit0 runtime/goos.Hwinit0
+func hwinit0() {
+	// Empty: cpuinit_loong64.s already wired RamStart/Bloc and SP
+	// before the runtime entered. No further pre-osinit setup needed.
+}
+
+//go:linkname hwinit1 runtime/goos.Hwinit1
+func hwinit1() {
+	// No-op under UEFI: firmware already enabled the FPU, installed
+	// exception vectors and brought up the stable-timer. A real
+	// loader fills this in after ExitBootServices.
+}
+
+//go:linkname nanotime runtime/goos.Nanotime
+func nanotime() int64 {
+	freq := counterFreq()
+	if freq <= 0 {
+		return 0
+	}
+	cnt := uint64(rdStableCounter())
+	// nanoseconds = cnt * 1e9 / freq. Split as (cnt / freq) * 1e9 +
+	// (cnt % freq) * 1e9 / freq to avoid the uint64 overflow that
+	// `cnt * 1e9` would hit past ~18 G ticks.
+	f := uint64(freq)
+	secs := cnt / f
+	rem := cnt % f
+	return int64(secs*1_000_000_000 + (rem*1_000_000_000)/f)
+}
+
 //go:linkname initRNG runtime/goos.InitRNG
 func initRNG() {
-	loong64.InitRNG()
+	rngState = uint64(rdStableCounter()) ^ 0x9E3779B97F4A7C15
+}
+
+// splitmix64 PRNG seeded by the stable-timer in initRNG. Not crypto-
+// grade; a real loader will want a HW RNG or virtio-rng.
+var rngState uint64
+
+func rngNext() uint64 {
+	rngState += 0x9E3779B97F4A7C15
+	z := rngState
+	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9
+	z = (z ^ (z >> 27)) * 0x94D049BB133111EB
+	return z ^ (z >> 31)
 }
 
 //go:linkname getRandomData runtime/goos.GetRandomData
 func getRandomData(b []byte) {
-	loong64.GetRandomData(b)
+	for i := 0; i < len(b); {
+		r := rngNext()
+		for j := 0; j < 8 && i < len(b); j++ {
+			b[i] = byte(r)
+			r >>= 8
+			i++
+		}
+	}
 }
