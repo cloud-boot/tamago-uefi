@@ -157,14 +157,21 @@ const VirtioNetAcceptedFeaturesNarrow uint64 = VirtioNetAcceptedFeatures |
 	(1 << 28) | (1 << 29)
 
 // VirtioNetAcceptedFeaturesWithPacked is the "absolutely everything VZ
-// offers including RING_PACKED" mask. Used by the R-M2c narrow only
-// to test whether VZ accepts the packed-ring negotiation at all (if
-// FEATURES_OK sticks with bit 34 set, the device offered packed
-// honestly; if FEATURES_OK clears, it offered packed but doesn't
-// actually want it). The M2 driver does NOT implement packed-ring
-// semantics, so this mask is a diagnostic probe, never a production
-// configuration.
-const VirtioNetAcceptedFeaturesWithPacked uint64 = VirtioNetAcceptedFeaturesNarrow | (1 << 34)
+// offers including RING_PACKED" mask. Originally introduced by R-M2c
+// as a pure diagnostic — "does FEATURES_OK stick when we ack bit 34?"
+// — it is now the production accepted mask for the M2-A experiment
+// (packed-ring virtqueue support; see `virtqueue_packed.go`). When the
+// device offers VIRTIO_F_RING_PACKED and the M2-A code path is taken,
+// the driver switches its queue layout from split (§2.6) to packed
+// (§2.7) for both rxq and txq.
+//
+// On QEMU+EDK2 the device-offered set already includes bit 34 in modern
+// QEMU (5.x+), but with the `packed=on` device option NOT set QEMU
+// won't actually serve packed-ring semantics — it will fail
+// FEATURES_OK after the driver writes the bit. The M2-A QEMU
+// validation runs with `-device virtio-net-pci,packed=on` so the
+// device genuinely speaks packed-ring.
+const VirtioNetAcceptedFeaturesWithPacked uint64 = VirtioNetAcceptedFeaturesNarrow | VirtioFeatureRingPacked
 
 // VirtioNetHdr is the Go view of `struct virtio_net_hdr` (Virtio 1.1
 // §5.1.6.1). M2 always emits an all-zero header and ignores the

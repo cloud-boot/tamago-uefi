@@ -128,6 +128,13 @@ const (
 	VirtioNetFeatureMAC    uint64 = 1 << 5  // VIRTIO_NET_F_MAC
 	VirtioNetFeatureStatus uint64 = 1 << 16 // VIRTIO_NET_F_STATUS
 	VirtioFeatureVersion1  uint64 = 1 << 32 // VIRTIO_F_VERSION_1
+	// VirtioFeatureRingPacked is VIRTIO_F_RING_PACKED (Virtio 1.1
+	// §6 — bit 34). When acknowledged, the driver MUST use the
+	// packed-virtqueue layout (Virtio 1.1 §2.7) for every queue;
+	// the split-virtqueue layout (§2.6) is no longer in scope. M2-A
+	// is the experiment that adds packed-ring support to test
+	// whether VZ's TX path unblocks under this transport.
+	VirtioFeatureRingPacked uint64 = 1 << 34 // VIRTIO_F_RING_PACKED
 )
 
 // VirtioModernConfig is the parsed, pre-located handle for one virtio

@@ -35,9 +35,23 @@ type VirtioNet struct {
 	// settled on. Exposed for the probe's "we accepted X" diagnostic.
 	NegotiatedFeatures uint64
 
-	// rxq / txq are the two virtqueues set up by OpenVirtioNet.
+	// usePacked is true when VIRTIO_F_RING_PACKED (bit 34) was
+	// negotiated; the driver then uses the packed-virtqueue layout
+	// (Virtio 1.1 §2.7) instead of split-ring (§2.6). When false,
+	// `rxq` / `txq` are valid and `prxq` / `ptxq` are nil; when true,
+	// the reverse.
+	usePacked bool
+
+	// rxq / txq are the two split-ring virtqueues, used when
+	// `usePacked` is false.
 	rxq *Virtqueue
 	txq *Virtqueue
+
+	// prxq / ptxq are the two packed-ring virtqueues, used when
+	// `usePacked` is true. Only one of {rxq,txq} or {prxq,ptxq} is
+	// populated per VirtioNet instance.
+	prxq *PackedVirtqueue
+	ptxq *PackedVirtqueue
 }
 
 // OpenVirtioNetWithFeatures drives the full bring-up of one virtio-net
@@ -153,14 +167,40 @@ func openVirtioNetCore(pciIO uint64, acceptedFeatures uint64) (*VirtioNet, error
 		return nil, ErrFeaturesNotOK
 	}
 
-	// Step 6: queue setup.
-	rxq, err := setupQueue(cfg, VirtioNetRxQueueIdx, VirtioNetRxRingSize)
-	if err != nil {
-		return nil, err
+	// Step 6: queue setup. Packed-ring dispatch (M2-A): if the
+	// driver negotiated VIRTIO_F_RING_PACKED, every queue uses the
+	// packed-virtqueue layout (Virtio 1.1 §2.7); otherwise the
+	// split-ring path is used (§2.6).
+	usePacked := negotiated&VirtioFeatureRingPacked != 0
+
+	v := &VirtioNet{
+		Cfg:                cfg,
+		NegotiatedFeatures: negotiated,
+		usePacked:          usePacked,
 	}
-	txq, err := setupQueue(cfg, VirtioNetTxQueueIdx, VirtioNetTxRingSize)
-	if err != nil {
-		return nil, err
+
+	if usePacked {
+		prxq, err := setupPackedQueue(cfg, VirtioNetRxQueueIdx, VirtioNetRxRingSize)
+		if err != nil {
+			return nil, err
+		}
+		ptxq, err := setupPackedQueue(cfg, VirtioNetTxQueueIdx, VirtioNetTxRingSize)
+		if err != nil {
+			return nil, err
+		}
+		v.prxq = prxq
+		v.ptxq = ptxq
+	} else {
+		rxq, err := setupQueue(cfg, VirtioNetRxQueueIdx, VirtioNetRxRingSize)
+		if err != nil {
+			return nil, err
+		}
+		txq, err := setupQueue(cfg, VirtioNetTxQueueIdx, VirtioNetTxRingSize)
+		if err != nil {
+			return nil, err
+		}
+		v.rxq = rxq
+		v.txq = txq
 	}
 
 	// Step 7: DRIVER_OK.
@@ -185,14 +225,7 @@ func openVirtioNetCore(pciIO uint64, acceptedFeatures uint64) (*VirtioNet, error
 		// the time we get here.)
 		return nil, ErrMACReadFailed
 	}
-
-	v := &VirtioNet{
-		Cfg:                cfg,
-		MAC:                mac,
-		NegotiatedFeatures: negotiated,
-		rxq:                rxq,
-		txq:                txq,
-	}
+	v.MAC = mac
 
 	// Pre-post N receive buffers so the device has somewhere to
 	// land incoming frames.
@@ -201,8 +234,14 @@ func openVirtioNetCore(pciIO uint64, acceptedFeatures uint64) (*VirtioNet, error
 	}
 	// Notify the device that the rxq has buffers available — VZ in
 	// particular won't deliver frames otherwise.
-	if err := cfg.NotifyQueue(VirtioNetRxQueueIdx, rxq.NotifyOff); err != nil {
-		return nil, err
+	if usePacked {
+		if err := cfg.NotifyQueue(VirtioNetRxQueueIdx, v.prxq.NotifyOff); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := cfg.NotifyQueue(VirtioNetRxQueueIdx, v.rxq.NotifyOff); err != nil {
+			return nil, err
+		}
 	}
 
 	return v, nil
@@ -270,11 +309,89 @@ func setupQueue(cfg *VirtioModernConfig, queueIdx uint16, desiredSize uint16) (*
 // doesn't exist" condition.
 var ErrQueueNotAvailable = vpciError("uefi: virtio-net: device reports QueueSize=0 for required queue")
 
+// setupPackedQueue performs the per-queue init for the packed-ring
+// layout (Virtio 1.1 §2.7). Mirrors `setupQueue` but uses the
+// packed-virtqueue allocation + publishes the three per-queue
+// address registers with the packed-ring interpretation:
+//
+//	queue_desc   → descriptor ring (single shared region)
+//	queue_driver → driver-event suppression region (4 bytes)
+//	queue_device → device-event suppression region (4 bytes)
+//
+// Register offsets are unchanged from split-ring; the spec
+// repurposes the addresses without renaming the registers.
+func setupPackedQueue(cfg *VirtioModernConfig, queueIdx uint16, desiredSize uint16) (*PackedVirtqueue, error) {
+	if err := cfg.SelectQueue(queueIdx); err != nil {
+		return nil, err
+	}
+	maxSize, err := cfg.QueueSize()
+	if err != nil {
+		return nil, err
+	}
+	if maxSize == 0 {
+		return nil, ErrQueueNotAvailable
+	}
+	size := desiredSize
+	if size > maxSize {
+		size = maxSize
+	}
+	// Round size DOWN to a power of two.
+	for size&(size-1) != 0 {
+		size &= size - 1
+	}
+	if size == 0 {
+		return nil, ErrPackedQueueSizeTooSmall
+	}
+	if err := cfg.SetQueueSize(size); err != nil {
+		return nil, err
+	}
+	notifyOff, err := cfg.QueueNotifyOff()
+	if err != nil {
+		return nil, err
+	}
+	q, err := NewPackedVirtqueue(size, queueIdx, notifyOff)
+	if err != nil {
+		return nil, err
+	}
+	descAddr := q.BasePhys + uint64(q.Layout.DescRingOffset)
+	driverEventAddr := q.BasePhys + uint64(q.Layout.DriverEventOffset)
+	deviceEventAddr := q.BasePhys + uint64(q.Layout.DeviceEventOffset)
+	if err := cfg.SetQueueDesc(descAddr); err != nil {
+		return nil, err
+	}
+	if err := cfg.SetQueueDriver(driverEventAddr); err != nil {
+		return nil, err
+	}
+	if err := cfg.SetQueueDevice(deviceEventAddr); err != nil {
+		return nil, err
+	}
+	if err := cfg.SetQueueEnable(1); err != nil {
+		return nil, err
+	}
+	return q, nil
+}
+
 // fillRxRing posts VirtioNetRxRingSize receive buffers on the rxq.
 // Each buffer is `VirtioNetHdrSize + VirtioNetMaxFrameSize` bytes
 // (the device writes the virtio header first, then the Ethernet
 // frame).
+//
+// Dispatches on `usePacked` — for the packed-ring path each
+// AddBuffer publishes to the shared descriptor ring; for split-ring
+// the avail-ring is updated under the hood.
 func (v *VirtioNet) fillRxRing() error {
+	if v.usePacked {
+		for i := uint16(0); i < v.prxq.Layout.Size; i++ {
+			phys, addr, err := AllocDMABuffer(VirtioNetHdrSize + VirtioNetMaxFrameSize)
+			if err != nil {
+				return err
+			}
+			if _, err := v.prxq.AddBuffer(addr, phys, VirtioNetHdrSize+VirtioNetMaxFrameSize, true); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for i := uint16(0); i < v.rxq.Layout.Size; i++ {
 		phys, addr, err := AllocDMABuffer(VirtioNetHdrSize + VirtioNetMaxFrameSize)
 		if err != nil {
@@ -288,13 +405,22 @@ func (v *VirtioNet) fillRxRing() error {
 	return nil
 }
 
-// RxQueue / TxQueue expose the per-direction *Virtqueue handles. The
-// fields themselves stay unexported so callers can't reseat them; these
-// getters give the R-M2c diagnostic dump (and any future
-// observability surface) read-only access to descriptor / avail / used
-// ring bytes.
+// UsePacked reports whether this VirtioNet instance is running on
+// the packed-virtqueue transport. Surfaced for the M2-A probe so it
+// can dump the packed-ring state when the flag is set.
+func (v *VirtioNet) UsePacked() bool { return v.usePacked }
+
+// RxQueue / TxQueue expose the per-direction split-ring *Virtqueue
+// handles. Return nil when the device is running in packed-ring
+// mode; callers can detect that via `UsePacked()` and switch to
+// `PackedRxQueue` / `PackedTxQueue`.
 func (v *VirtioNet) RxQueue() *Virtqueue { return v.rxq }
 func (v *VirtioNet) TxQueue() *Virtqueue { return v.txq }
+
+// PackedRxQueue / PackedTxQueue expose the per-direction packed-ring
+// handles. Return nil when the device is running in split-ring mode.
+func (v *VirtioNet) PackedRxQueue() *PackedVirtqueue { return v.prxq }
+func (v *VirtioNet) PackedTxQueue() *PackedVirtqueue { return v.ptxq }
 
 // TransmitFrame prepends a virtio_net_hdr to `frame`, allocates a
 // DMA-visible buffer, copies the header + payload in, enqueues it
@@ -302,10 +428,18 @@ func (v *VirtioNet) TxQueue() *Virtqueue { return v.txq }
 // completion (the device returns the descriptor when it has read
 // the frame and pushed it onto the host network).
 //
-// Polls for up to ~100ms (10000 * ~10us each, accounting for the
-// firmware call overhead). On VZ this is far more than needed; on
-// QEMU+EDK2 the round-trip is usually < 1ms.
+// Dispatches on `usePacked`. Polls for up to ~100ms (200000
+// iterations * ~few microseconds each, accounting for the firmware
+// call overhead). On VZ this is far more than needed; on QEMU+EDK2
+// the round-trip is usually < 1ms.
 func (v *VirtioNet) TransmitFrame(frame []byte) error {
+	if v.usePacked {
+		return v.transmitFramePacked(frame)
+	}
+	return v.transmitFrameSplit(frame)
+}
+
+func (v *VirtioNet) transmitFrameSplit(frame []byte) error {
 	totalLen := VirtioNetHdrSize + len(frame)
 	phys, addr, err := AllocDMABuffer(uintptr(totalLen))
 	if err != nil {
@@ -344,6 +478,31 @@ func (v *VirtioNet) TransmitFrame(frame []byte) error {
 	return ErrTransmitTimeout
 }
 
+func (v *VirtioNet) transmitFramePacked(frame []byte) error {
+	totalLen := VirtioNetHdrSize + len(frame)
+	phys, addr, err := AllocDMABuffer(uintptr(totalLen))
+	if err != nil {
+		return err
+	}
+	dst := unsafe.Slice((*byte)(unsafe.Pointer(addr)), totalLen)
+	copy(dst[VirtioNetHdrSize:], frame)
+	if _, err := v.ptxq.AddBuffer(addr, phys, uint32(totalLen), false); err != nil {
+		return err
+	}
+	if err := v.Cfg.NotifyQueue(VirtioNetTxQueueIdx, v.ptxq.NotifyOff); err != nil {
+		return err
+	}
+	for spin := 0; spin < 200000; spin++ {
+		gotIdx, _, ok := v.ptxq.PollUsed()
+		if !ok {
+			continue
+		}
+		_ = v.ptxq.Reclaim(gotIdx)
+		return nil
+	}
+	return ErrTransmitTimeout
+}
+
 // ReceiveFrame polls the rxq for one new frame. Returns the Ethernet
 // payload (header stripped) on success, or ErrReceiveTimeout if no
 // frame arrives within `pollIterations` busy-spin cycles (~100ms
@@ -351,8 +510,15 @@ func (v *VirtioNet) TransmitFrame(frame []byte) error {
 //
 // The returned slice is a copy from the descriptor's DMA buffer —
 // safe to retain after this call returns (and after the descriptor
-// is reclaimed and refilled).
+// is reclaimed and refilled). Dispatches on `usePacked`.
 func (v *VirtioNet) ReceiveFrame(pollIterations int) ([]byte, error) {
+	if v.usePacked {
+		return v.receiveFramePacked(pollIterations)
+	}
+	return v.receiveFrameSplit(pollIterations)
+}
+
+func (v *VirtioNet) receiveFrameSplit(pollIterations int) ([]byte, error) {
 	for spin := 0; spin < pollIterations; spin++ {
 		descIdx, length, ok := v.rxq.PollUsed()
 		if !ok {
@@ -377,6 +543,28 @@ func (v *VirtioNet) ReceiveFrame(pollIterations int) ([]byte, error) {
 		}
 		if err := v.Cfg.NotifyQueue(VirtioNetRxQueueIdx, v.rxq.NotifyOff); err != nil {
 			// Same — degraded but we have the frame.
+		}
+		return StripVirtioNetHdr(out)
+	}
+	return nil, ErrReceiveTimeout
+}
+
+func (v *VirtioNet) receiveFramePacked(pollIterations int) ([]byte, error) {
+	for spin := 0; spin < pollIterations; spin++ {
+		descIdx, length, ok := v.prxq.PollUsed()
+		if !ok {
+			continue
+		}
+		buf := v.prxq.Buffers[descIdx]
+		raw := unsafe.Slice((*byte)(unsafe.Pointer(buf.Addr)), int(length))
+		out := make([]byte, len(raw))
+		copy(out, raw)
+		_ = v.prxq.Reclaim(descIdx)
+		if _, err := v.prxq.AddBuffer(buf.Addr, buf.Phys, buf.Len, true); err != nil {
+			// degraded but frame is good
+		}
+		if err := v.Cfg.NotifyQueue(VirtioNetRxQueueIdx, v.prxq.NotifyOff); err != nil {
+			// degraded but frame is good
 		}
 		return StripVirtioNetHdr(out)
 	}
