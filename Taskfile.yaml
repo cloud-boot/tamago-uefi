@@ -704,7 +704,15 @@ tasks:
       # truncates the file when opened so a stale root-owned pcap is
       # harmless. If you want a clean pcap, `sudo rm -f /tmp/m2b-arp.pcap`
       # in your shell before invoking task.
-      - 'dd if=/dev/zero of={{.SCRATCH}} bs=1m count=1 status=none'
+      # Stage the scratch disk with the BlkPrintkScratchMagic at LBA 0
+      # via the canonical blkprintk-seed helper. A plain `dd if=/dev/zero`
+      # is NOT sufficient: phase2_blkprintk.go's runBlkPrintkSetup walks
+      # Block-IO handles and binds the ring ONLY to the disk whose first
+      # 16 bytes match uefiboard.BlkPrintkScratchMagic. Without the
+      # marker the probe degrades to ConOut-only — and on Apple VZ
+      # (vfkit 0.6.3) ConOut is captured 0 bytes, so the recovered
+      # scratch is empty (writeCount=0 payloadBytes=0).
+      - 'cd "{{.TASKFILE_DIR}}" && GOWORK=off go run ./cmd/blkprintk-seed -out {{.SCRATCH}} -size-mib 1'
       - 'dd if=/dev/zero of={{.ESP}} bs=1m count=16 status=none'
       - 'mformat -i {{.ESP}} -v CLOUDBOOTB'
       - 'mmd -i {{.ESP}} ::/EFI'
@@ -750,7 +758,7 @@ tasks:
           sudo tcpdump -nn -r {{.PCAP}} arp 2>/dev/null | grep -E "169.254.2.66|169.254.99.99" || echo "no M2B! marker ARP found"
         fi
       - 'echo "--- recovered blkprintk pre-EBS scratch ({{.SCRATCH}}) ---"'
-      - 'cd "{{.TASKFILE_DIR}}" && GOWORK=off go run ./cmd/blkprintk-recover {{.SCRATCH}}'
+      - 'cd "{{.TASKFILE_DIR}}" && GOWORK=off go run ./cmd/blkprintk-recover -in {{.SCRATCH}}'
       - 'echo "--- M2-B verdict signals to look for ---"'
       - 'echo "  PASS = pre-EBS dump reaches \"ExitToBareMetal\" + ARP marker captured on bridge"'
       - 'echo "  PARTIAL = pre-EBS reaches end but no marker (sudo tcpdump skipped or device gated post-EBS)"'
