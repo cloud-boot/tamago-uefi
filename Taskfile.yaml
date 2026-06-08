@@ -1176,6 +1176,209 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/liveoci/run.sh" loong64'
 
+  # ------------------------------------------------------------------
+  # Phase 2 M8.0 — chain-boot mechanism. The parent EFI loads a
+  # tiny chained EFI payload (cmd/chainedhello) embedded at build
+  # time via //go:embed, calls gBS->LoadImage on it, then
+  # gBS->StartImage to hand off control, then UnloadImage to clean
+  # up. The chained payload (per-arch BOOT*-CHAINED.EFI) prints
+  # ">>> M8.0 chained payload — Hello from <ARCH> <<<" and returns
+  # via gBS->Exit so the parent's StartImage call returns cleanly.
+  # Outputs go to BOOT<ARCH>-EFIHANDOVER.EFI. No network needed.
+  #
+  # Build order per arch: chainedhello:elf → chainedhello:efi
+  # (copies into internal/embed_chained/chained_<arch>.efi) →
+  # efihandover:elf (compiles the parent with the embed visible)
+  # → efihandover:efi.
+  chainedhello:elf:amd64:
+    desc: 'Build app_amd64_chainedhello.elf (TamaGo PIE, M8.0 chained payload).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_chainedhello.elf ./cmd/chainedhello'
+
+  chainedhello:elf:arm64:
+    desc: 'Build app_arm64_chainedhello.elf (TamaGo PIE, M8.0 chained payload).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_chainedhello.elf ./cmd/chainedhello'
+
+  chainedhello:elf:riscv64:
+    desc: 'Build app_riscv64_chainedhello.elf (TamaGo PIE, M8.0 chained payload).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_chainedhello.elf ./cmd/chainedhello'
+
+  chainedhello:elf:loong64:
+    desc: 'Build app_loong64_chainedhello.elf (TamaGo PIE, M8.0 chained payload).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_chainedhello.elf ./cmd/chainedhello'
+
+  # chainedhello:efi:<arch> — links the chained PIE ELF into a
+  # PE32+/EFI and ALSO copies it into the embed_chained package's
+  # per-arch slot (chained_<arch>.efi) so the next parent build
+  # picks it up via //go:embed.
+  chainedhello:efi:amd64:
+    desc: 'Build M8.0 BOOTX64-CHAINED.EFI and stage as embed_chained/chained_amd64.efi.'
+    deps: [chainedhello:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINED.EFI" "{{.TASKFILE_DIR}}/app_amd64_chainedhello.elf"'
+      - 'cp "{{.TASKFILE_DIR}}/BOOTX64-CHAINED.EFI" "{{.TASKFILE_DIR}}/internal/embed_chained/chained_amd64.efi"'
+
+  chainedhello:efi:arm64:
+    desc: 'Build M8.0 BOOTAA64-CHAINED.EFI and stage as embed_chained/chained_arm64.efi.'
+    deps: [chainedhello:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-CHAINED.EFI" "{{.TASKFILE_DIR}}/app_arm64_chainedhello.elf"'
+      - 'cp "{{.TASKFILE_DIR}}/BOOTAA64-CHAINED.EFI" "{{.TASKFILE_DIR}}/internal/embed_chained/chained_arm64.efi"'
+
+  chainedhello:efi:riscv64:
+    desc: 'Build M8.0 BOOTRISCV64-CHAINED.EFI and stage as embed_chained/chained_riscv64.efi.'
+    deps: [chainedhello:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-CHAINED.EFI" "{{.TASKFILE_DIR}}/app_riscv64_chainedhello.elf"'
+      - 'cp "{{.TASKFILE_DIR}}/BOOTRISCV64-CHAINED.EFI" "{{.TASKFILE_DIR}}/internal/embed_chained/chained_riscv64.efi"'
+
+  chainedhello:efi:loong64:
+    desc: 'Build M8.0 BOOTLOONGARCH64-CHAINED.EFI and stage as embed_chained/chained_loong64.efi.'
+    deps: [chainedhello:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-CHAINED.EFI" "{{.TASKFILE_DIR}}/app_loong64_chainedhello.elf"'
+      - 'cp "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-CHAINED.EFI" "{{.TASKFILE_DIR}}/internal/embed_chained/chained_loong64.efi"'
+
+  # efihandover:elf:<arch> — depends on chainedhello:efi:<arch> so
+  # the //go:embed directive has its target file in place before
+  # the parent is compiled. Without that dep, the embed package's
+  # build would fail with "pattern chained_<arch>.efi: no matching
+  # files found".
+  efihandover:elf:amd64:
+    desc: 'Build app_amd64_efihandover.elf (TamaGo PIE, M8.0 chain-boot parent).'
+    deps: [check-toolchain, chainedhello:efi:amd64]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_efi_handover -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_efihandover.elf .'
+
+  efihandover:elf:arm64:
+    desc: 'Build app_arm64_efihandover.elf (TamaGo PIE, M8.0 chain-boot parent).'
+    deps: [check-toolchain, chainedhello:efi:arm64]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_efi_handover -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_efihandover.elf .'
+
+  efihandover:elf:riscv64:
+    desc: 'Build app_riscv64_efihandover.elf (TamaGo PIE, M8.0 chain-boot parent).'
+    deps: [check-toolchain, chainedhello:efi:riscv64]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_efi_handover -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_efihandover.elf .'
+
+  efihandover:elf:loong64:
+    desc: 'Build app_loong64_efihandover.elf (TamaGo PIE, M8.0 chain-boot parent).'
+    deps: [check-toolchain, chainedhello:efi:loong64]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_efi_handover -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_efihandover.elf .'
+
+  efihandover:efi:amd64:
+    desc: 'Build Phase-2 M8.0 BOOTX64-EFIHANDOVER.EFI (chain-boot parent).'
+    deps: [efihandover:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-EFIHANDOVER.EFI" "{{.TASKFILE_DIR}}/app_amd64_efihandover.elf"'
+
+  efihandover:efi:arm64:
+    desc: 'Build Phase-2 M8.0 BOOTAA64-EFIHANDOVER.EFI (chain-boot parent).'
+    deps: [efihandover:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-EFIHANDOVER.EFI" "{{.TASKFILE_DIR}}/app_arm64_efihandover.elf"'
+
+  efihandover:efi:riscv64:
+    desc: 'Build Phase-2 M8.0 BOOTRISCV64-EFIHANDOVER.EFI (chain-boot parent).'
+    deps: [efihandover:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-EFIHANDOVER.EFI" "{{.TASKFILE_DIR}}/app_riscv64_efihandover.elf"'
+
+  efihandover:efi:loong64:
+    desc: 'Build Phase-2 M8.0 BOOTLOONGARCH64-EFIHANDOVER.EFI (chain-boot parent).'
+    deps: [efihandover:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-EFIHANDOVER.EFI" "{{.TASKFILE_DIR}}/app_loong64_efihandover.elf"'
+
+  efihandover:all:
+    desc: 'Build all four Phase-2 M8.0 chain-boot parent EFIs.'
+    cmds:
+      - task: efihandover:efi:amd64
+      - task: efihandover:efi:arm64
+      - task: efihandover:efi:riscv64
+      - task: efihandover:efi:loong64
+
+  efihandover:live:amd64:
+    desc: 'Live M8.0 chain-boot smoke from BOOTX64-EFIHANDOVER.EFI under QEMU+EDK2.'
+    deps: [efihandover:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveefihandover/run.sh" amd64'
+
+  efihandover:live:arm64:
+    desc: 'Live M8.0 chain-boot smoke from BOOTAA64-EFIHANDOVER.EFI under QEMU+EDK2.'
+    deps: [efihandover:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveefihandover/run.sh" arm64'
+
+  efihandover:live:riscv64:
+    desc: 'Live M8.0 chain-boot smoke from BOOTRISCV64-EFIHANDOVER.EFI under QEMU+EDK2.'
+    deps: [efihandover:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveefihandover/run.sh" riscv64'
+
+  efihandover:live:loong64:
+    desc: 'Live M8.0 chain-boot smoke from BOOTLOONGARCH64-EFIHANDOVER.EFI under QEMU+EDK2.'
+    deps: [efihandover:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveefihandover/run.sh" loong64'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -1201,6 +1404,8 @@ tasks:
       - rm -f app_amd64_http.elf app_arm64_http.elf app_riscv64_http.elf app_loong64_http.elf
       - rm -f app_amd64_https.elf app_arm64_https.elf app_riscv64_https.elf app_loong64_https.elf
       - rm -f app_amd64_oci.elf app_arm64_oci.elf app_riscv64_oci.elf app_loong64_oci.elf
+      - rm -f app_amd64_chainedhello.elf app_arm64_chainedhello.elf app_riscv64_chainedhello.elf app_loong64_chainedhello.elf
+      - rm -f app_amd64_efihandover.elf app_arm64_efihandover.elf app_riscv64_efihandover.elf app_loong64_efihandover.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
@@ -1212,3 +1417,6 @@ tasks:
       - rm -f BOOTX64-HTTP.EFI BOOTAA64-HTTP.EFI BOOTRISCV64-HTTP.EFI BOOTLOONGARCH64-HTTP.EFI
       - rm -f BOOTX64-HTTPS.EFI BOOTAA64-HTTPS.EFI BOOTRISCV64-HTTPS.EFI BOOTLOONGARCH64-HTTPS.EFI
       - rm -f BOOTX64-OCI.EFI BOOTAA64-OCI.EFI BOOTRISCV64-OCI.EFI BOOTLOONGARCH64-OCI.EFI
+      - rm -f BOOTX64-CHAINED.EFI BOOTAA64-CHAINED.EFI BOOTRISCV64-CHAINED.EFI BOOTLOONGARCH64-CHAINED.EFI
+      - rm -f BOOTX64-EFIHANDOVER.EFI BOOTAA64-EFIHANDOVER.EFI BOOTRISCV64-EFIHANDOVER.EFI BOOTLOONGARCH64-EFIHANDOVER.EFI
+      - rm -f internal/embed_chained/chained_amd64.efi internal/embed_chained/chained_arm64.efi internal/embed_chained/chained_riscv64.efi internal/embed_chained/chained_loong64.efi

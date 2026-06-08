@@ -24,7 +24,7 @@
 // `phase2_probe` is mutually exclusive with the M1/M1.5/M1.6/M2/M3/M4 dispatcher
 // at build time; the M1/M1.5/M1.6/M2/M3/M4 tags compose freely.
 
-//go:build !phase2_probe && !phase2_pcienum && !phase2_snpenum && !phase2_blkprintk && !phase2_virtionet_tx && !phase2_ministack_ping && !phase2_dhcp4_acquire
+//go:build !phase2_probe && !phase2_pcienum && !phase2_snpenum && !phase2_blkprintk && !phase2_virtionet_tx && !phase2_ministack_ping && !phase2_dhcp4_acquire && !phase2_http_get && !phase2_https_get && !phase2_oci_fetch && !phase2_efi_handover
 
 package main
 
