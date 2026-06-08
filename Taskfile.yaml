@@ -687,6 +687,7 @@ tasks:
   live:vz:m2b:
     desc: 'Run M2-B (post-EBS) live on Apple VZ via vfkit; capture pre-EBS scratch + post-EBS ARP (SUDO_CAPTURE=1 for tcpdump).'
     deps: [postebs:efi:arm64]
+    interactive: true
     vars:
       SCRATCH:      '{{.SCRATCH | default "/tmp/m2b-scratch.img"}}'
       ESP:          '{{.ESP | default "/tmp/m2b-esp.img"}}'
@@ -697,11 +698,12 @@ tasks:
       TIMEOUT:      '{{.TIMEOUT | default "30"}}'
       SUDO_CAPTURE: '{{.SUDO_CAPTURE | default ""}}'
     cmds:
-      - |
-        rm -f {{.NVRAM}} {{.LOG}}
-        if [ -f {{.PCAP}} ]; then
-          if [ -w {{.PCAP}} ]; then rm -f {{.PCAP}}; else sudo rm -f {{.PCAP}}; fi
-        fi
+      - 'rm -f {{.NVRAM}} {{.LOG}}'
+      # NOTE: {{.PCAP}} cleanup is skipped — task's non-interactive shell
+      # can't allocate a pty for sudo password prompt. tcpdump's -w
+      # truncates the file when opened so a stale root-owned pcap is
+      # harmless. If you want a clean pcap, `sudo rm -f /tmp/m2b-arp.pcap`
+      # in your shell before invoking task.
       - 'dd if=/dev/zero of={{.SCRATCH}} bs=1m count=1 status=none'
       - 'dd if=/dev/zero of={{.ESP}} bs=1m count=16 status=none'
       - 'mformat -i {{.ESP}} -v CLOUDBOOTB'
