@@ -729,24 +729,26 @@ tasks:
           echo "skipping tcpdump capture (run with SUDO_CAPTURE=1 to enable)"
         fi
       - |
-        # Avoid the "vfkit | tee" pipeline because $! returns tee's PID,
-        # not vfkit's, so the watchdog kills the wrong process and the
-        # M2-B probe's post-EBS spin loop hangs forever. Redirect to
-        # logfile directly; user can tail -f {{.LOG}}.stdout in another
-        # terminal to watch live.
+        # vfkit --pidfile writes its own PID to a file we can read.
+        # task's shell has $! unreliable (likely no job control under
+        # interactive:true), so don't rely on $!. Read pidfile after a
+        # short settle; fall back to pgrep -n vfkit if missing.
+        rm -f /tmp/m2b-vfkit.pid
         vfkit --memory 1024 --cpus 1 \
           --bootloader efi,variable-store={{.NVRAM}},create \
           --device virtio-blk,path={{.ESP}},readonly \
           --device virtio-blk,path={{.SCRATCH}} \
           --device virtio-net,nat \
           --device virtio-serial,logFilePath={{.LOG}} \
+          --pidfile /tmp/m2b-vfkit.pid \
           --log-level debug >{{.LOG}}.stdout 2>&1 &
-        VFKIT_PID=$!
+        sleep 1
+        VFKIT_PID=$(cat /tmp/m2b-vfkit.pid 2>/dev/null)
+        if [ -z "$VFKIT_PID" ]; then VFKIT_PID=$(pgrep -n vfkit 2>/dev/null); fi
         echo "vfkit PID=$VFKIT_PID; live output: tail -f {{.LOG}}.stdout"
-        ( sleep {{.TIMEOUT}}; kill -TERM $VFKIT_PID 2>/dev/null || true; sleep 2; kill -KILL $VFKIT_PID 2>/dev/null || true ) &
-        WATCHDOG_PID=$!
-        wait $VFKIT_PID 2>/dev/null || true
-        kill $WATCHDOG_PID 2>/dev/null || true
+        ( sleep {{.TIMEOUT}}; kill -TERM "$VFKIT_PID" 2>/dev/null || true; sleep 2; kill -KILL "$VFKIT_PID" 2>/dev/null || true ) &
+        # block until vfkit dies (natural or via watchdog)
+        while [ -n "$VFKIT_PID" ] && kill -0 "$VFKIT_PID" 2>/dev/null; do sleep 1; done
         echo "(vfkit exit; watchdog timeout was {{.TIMEOUT}}s)"
       - |
         if [ -n "{{.SUDO_CAPTURE}}" ] && [ -s /tmp/m2b-tcpdump.pid ]; then
