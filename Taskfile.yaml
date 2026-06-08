@@ -721,14 +721,20 @@ tasks:
           echo "skipping tcpdump capture (run with SUDO_CAPTURE=1 to enable)"
         fi
       - |
+        # Avoid the "vfkit | tee" pipeline because $! returns tee's PID,
+        # not vfkit's, so the watchdog kills the wrong process and the
+        # M2-B probe's post-EBS spin loop hangs forever. Redirect to
+        # logfile directly; user can tail -f {{.LOG}}.stdout in another
+        # terminal to watch live.
         vfkit --memory 1024 --cpus 1 \
           --bootloader efi,variable-store={{.NVRAM}},create \
           --device virtio-blk,path={{.ESP}},readonly \
           --device virtio-blk,path={{.SCRATCH}} \
           --device virtio-net,nat \
           --device virtio-serial,logFilePath={{.LOG}} \
-          --log-level debug 2>&1 | tee {{.LOG}}.stdout &
+          --log-level debug >{{.LOG}}.stdout 2>&1 &
         VFKIT_PID=$!
+        echo "vfkit PID=$VFKIT_PID; live output: tail -f {{.LOG}}.stdout"
         ( sleep {{.TIMEOUT}}; kill -TERM $VFKIT_PID 2>/dev/null || true; sleep 2; kill -KILL $VFKIT_PID 2>/dev/null || true ) &
         WATCHDOG_PID=$!
         wait $VFKIT_PID 2>/dev/null || true
