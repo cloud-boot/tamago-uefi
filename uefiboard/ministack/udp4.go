@@ -232,31 +232,46 @@ func (c *UDP4Conn) ReadFrom(buf []byte) (int, net.Addr, error) {
 	deadline := c.readDeadline
 	c.mu.Unlock()
 
-	var (
-		timerC <-chan time.Time
-		timer  *time.Timer
-	)
+	// Compute timeout for the inline RX pump. Same rationale as
+	// resolveARP / PingOnce — under tamago+UEFI the runtime has no
+	// async preemption so we can't rely on rxLoop putting datagrams
+	// on c.queue. Pump RX inline from this goroutine.
+	//
+	// NOTE: do NOT do an upfront `time.Until(deadline) <= 0` early
+	// exit — tamago's time arithmetic returns wonky values and would
+	// fire this check spuriously. The deadlineChecker (build-tagged)
+	// handles host vs tamago semantics correctly.
+	var timeout time.Duration
 	if !deadline.IsZero() {
-		d := time.Until(deadline)
-		if d <= 0 {
-			return 0, nil, ErrUDP4ReadTimeout
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			timeout = 1 // host-only safety; tamago ignores timeout
 		}
-		timer = time.NewTimer(d)
-		timerC = timer.C
-		defer timer.Stop()
+	} else {
+		timeout = 24 * time.Hour
 	}
-
-	select {
-	case dg, ok := <-c.queue:
-		if !ok {
-			return 0, nil, ErrUDP4ConnClosed
+	checker := newDeadlineChecker(timeout)
+	for !checker.expired() {
+		checker.tick()
+		// Fast path: dispatched datagram already on the queue.
+		select {
+		case dg, ok := <-c.queue:
+			if !ok {
+				return 0, nil, ErrUDP4ConnClosed
+			}
+			n := copy(buf, dg.Payload)
+			src := dg.Src
+			return n, &src, nil
+		default:
 		}
-		n := copy(buf, dg.Payload)
-		src := dg.Src
-		return n, &src, nil
-	case <-timerC:
-		return 0, nil, ErrUDP4ReadTimeout
+		// Pump one frame from the link inline.
+		rx, rxErr := c.stack.link.RecvFrame()
+		if rxErr != nil {
+			continue
+		}
+		_ = c.stack.dispatch(rx)
 	}
+	return 0, nil, ErrUDP4ReadTimeout
 }
 
 // WriteTo sends `payload` as a single UDP datagram to `dst`. `dst` must

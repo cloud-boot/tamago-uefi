@@ -392,12 +392,17 @@ func (s *Stack) dhcp4Acquire(timeout time.Duration, xidSeed uint32) (DHCP4Lease,
 // silently consumed and the loop continues. A NAK matching our xid
 // returns ErrDHCP4Nak.
 func dhcp4WaitFor(conn *UDP4Conn, wantXID uint32, wantType uint8, deadline time.Time) (net.IP, dhcp4Options, error) {
+	// Compute timeout once. The deadlineChecker honors both wall-clock
+	// (host) and iter-count (tamago) caps, same pattern as resolveARP
+	// / PingOnce / UDP4Conn.ReadFrom.
+	timeout := time.Until(deadline)
+	if timeout <= 0 {
+		timeout = 1 * time.Second
+	}
+	outer := newDeadlineChecker(timeout)
 	buf := make([]byte, 1500)
-	for {
-		now := time.Now()
-		if !now.Before(deadline) {
-			return nil, nil, ErrDHCP4Timeout
-		}
+	for !outer.expired() {
+		outer.tick()
 		conn.SetReadDeadline(deadline)
 		n, _, err := conn.ReadFrom(buf)
 		if err == ErrUDP4ReadTimeout {
@@ -432,4 +437,5 @@ func dhcp4WaitFor(conn *UDP4Conn, wantXID uint32, wantType uint8, deadline time.
 			continue
 		}
 	}
+	return nil, nil, ErrDHCP4Timeout
 }
