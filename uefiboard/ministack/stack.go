@@ -169,6 +169,13 @@ func (s *Stack) rxLoop() {
 			// Most common error is the link's receive-timeout
 			// (no frame in the budget window). Loop back. Other
 			// transient errors are equally fine.
+			//
+			// NOTE: under tamago+UEFI this goroutine has been
+			// observed to never get scheduled because the runtime
+			// lacks hardware-timer-driven async preemption. The
+			// authoritative RX path is the inline pump in
+			// resolveARP / PingOnce; this loop is kept as a safety
+			// net for environments where async preemption works.
 			continue
 		}
 		_ = s.dispatch(frame)
@@ -485,16 +492,27 @@ func (s *Stack) PingOnce(dst net.IP, payload []byte, timeout time.Duration) (tim
 		return 0, err
 	}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-w.ch:
-		return time.Since(start), nil
-	case <-timer.C:
-		cleanup()
-		return 0, ErrPingTimeout
-	case <-s.stopCh:
-		cleanup()
-		return 0, ErrStackClosed
+	// Inline RX pump (same rationale + same platform-specific
+	// deadline as resolveARP).
+	pingChecker := newDeadlineChecker(timeout)
+	for !pingChecker.expired() {
+		pingChecker.tick()
+		// Fast path: reply already delivered.
+		select {
+		case <-w.ch:
+			return time.Since(start), nil
+		case <-s.stopCh:
+			cleanup()
+			return 0, ErrStackClosed
+		default:
+		}
+		// Pump one frame from the link inline.
+		rx, rxErr := s.link.RecvFrame()
+		if rxErr != nil {
+			continue
+		}
+		_ = s.dispatch(rx)
 	}
+	cleanup()
+	return 0, ErrPingTimeout
 }

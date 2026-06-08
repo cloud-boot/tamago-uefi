@@ -225,6 +225,10 @@ func resolveARP(
 	ch := e.waiter
 	mu.Unlock()
 
+	_ = ch // channel kept for compat with any concurrent rxLoop
+	// goroutine that does manage to run. The inline pump below is
+	// the canonical wakeup path under tamago+UEFI.
+
 	// Send broadcast ARP Request.
 	pkt, err := buildARPPacket(
 		ARPOpRequest,
@@ -242,21 +246,55 @@ func resolveARP(
 		return nil, err
 	}
 
-	// Wait for the RX dispatcher to fill the entry.
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-	select {
-	case <-ch:
+	// Wait for the reply. Under tamago+UEFI the runtime has no
+	// hardware-timer-driven async preemption, so a passive `select`
+	// on the cache-update channel doesn't reliably yield to the
+	// RX goroutine — the rxLoop never gets CPU. Pump RX inline:
+	// each iteration polls the link, dispatches incoming ARP frames
+	// directly, then re-checks the cache. Bounded by `timeout` via
+	// Nanotime polling (which is a UEFI Boot Service call, a yield
+	// point).
+	_ = ch // kept reachable in case a future scheduler swap restores
+	// channel-driven wakeup; the inline pump is the canonical path
+	// under tamago+UEFI.
+	// Inline RX pump. Under tamago+UEFI the runtime has no
+	// hardware-timer-driven async preemption, so a passive
+	// `select { case <-ch: ; case <-timer.C: }` doesn't reliably
+	// yield to the RX goroutine — the rxLoop never gets CPU and
+	// the select times out without ever processing the reply.
+	// Drive RX inline. The deadline-check is platform-specific:
+	// host builds use a wall-clock deadline; tamago uses a hard
+	// iter cap (time.Since has been observed to misbehave under
+	// the UEFI runtime). See arp_deadline_host.go +
+	// arp_deadline_tamago.go.
+	checker := newDeadlineChecker(timeout)
+	for !checker.expired() {
+		checker.tick()
+		// Fast path: cache already populated.
 		mu.Lock()
-		e := table.getLocked(t4)
-		mu.Unlock()
-		if e == nil || !e.resolved {
-			return nil, ErrARPTimeout
+		if e2 := table.getLocked(t4); e2 != nil && e2.resolved {
+			mac := append(net.HardwareAddr(nil), e2.mac...)
+			mu.Unlock()
+			return mac, nil
 		}
-		return append(net.HardwareAddr(nil), e.mac...), nil
-	case <-timer.C:
-		return nil, ErrARPTimeout
+		mu.Unlock()
+
+		// Pump one frame from the link inline.
+		rx, rxErr := link.RecvFrame()
+		if rxErr != nil {
+			continue
+		}
+		eth, ethErr := ParseEthernet(rx)
+		if ethErr != nil {
+			continue
+		}
+		if eth.EtherType == EtherTypeARP {
+			_ = handleARPFrame(mu, table, link, srcMAC, srcIP, eth.Payload)
+		}
+		// Other EtherTypes are discarded here — they'll be
+		// re-encountered when the higher-layer caller pumps.
 	}
+	return nil, ErrARPTimeout
 }
 
 // handleARPFrame is called by the Stack's RX dispatcher for every

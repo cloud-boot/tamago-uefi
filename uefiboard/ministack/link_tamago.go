@@ -26,10 +26,11 @@ import (
 )
 
 // virtioRecvPollBudget is the per-RecvFrame poll budget passed to
-// VirtioNet.ReceiveFrame. Tuned for ~10 ms wall on QEMU+EDK2; the
-// Stack's RX goroutine loops back into RecvFrame immediately on
-// timeout so the effective polling is continuous.
-const virtioRecvPollBudget = 1024
+// VirtioNet.ReceiveFrame. Kept small so the RX goroutine yields
+// frequently to the rest of the runtime — tamago's UEFI scheduler
+// doesn't have hardware-timer-driven async preemption, so busy
+// polling without yield points starves other goroutines.
+const virtioRecvPollBudget = 256
 
 // virtioNetLink wraps a `*uefiboard.VirtioNet` as a ministack Link.
 type virtioNetLink struct {
