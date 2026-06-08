@@ -573,6 +573,130 @@ tasks:
       - task: virtionet:efi:riscv64
       - task: virtionet:efi:loong64
 
+  # Phase-2 M3-minimal probe builds — same pipeline as M2 but with the
+  # `phase2_ministack_ping` tag (NOT `phase2_virtionet_tx` — the two
+  # probes both bring up the virtio-net device and would step on each
+  # other). The probe wires the M2 virtio-net device into our
+  # hand-rolled `uefiboard/ministack` (ARP + IPv4 + ICMP4), assigns
+  # 10.0.2.15/24 + default-gateway 10.0.2.2 (QEMU NAT defaults), and
+  # sends one ICMP Echo Request to the gateway. Outputs go to
+  # BOOT<ARCH>-MINISTACK.EFI.
+  #
+  # Replaces the M3 gvisor probe (R-M3'a CLOSED 2026-06-08 — gvisor
+  # was compile-clean but #GP'd inside EDK2 CpuDxe before our
+  # dispatcher ran). See `cloud-boot/docs/tamago-uefi-phase2-oci-loader.md`
+  # §5 R-M3'a CLOSED for the gvisor backstory + ministack scope.
+  ministack:elf:amd64:
+    desc: 'Build app_amd64_ministack.elf (TamaGo PIE, M3-minimal + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_ministack_ping -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_ministack.elf .'
+
+  ministack:elf:arm64:
+    desc: 'Build app_arm64_ministack.elf (TamaGo PIE, M3-minimal + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_ministack_ping -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_ministack.elf .'
+
+  ministack:elf:riscv64:
+    desc: 'Build app_riscv64_ministack.elf (TamaGo PIE, M3-minimal + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_ministack_ping -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_ministack.elf .'
+
+  ministack:elf:loong64:
+    desc: 'Build app_loong64_ministack.elf (TamaGo PIE, M3-minimal + M1.5/M1.6 tags).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_ministack_ping -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_ministack.elf .'
+
+  ministack:efi:amd64:
+    desc: 'Build Phase-2 M3-minimal BOOTX64-MINISTACK.EFI (hand-rolled ARP+IPv4+ICMP4 ping probe).'
+    deps: [ministack:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-MINISTACK.EFI" "{{.TASKFILE_DIR}}/app_amd64_ministack.elf"'
+
+  ministack:efi:arm64:
+    desc: 'Build Phase-2 M3-minimal BOOTAA64-MINISTACK.EFI (hand-rolled ARP+IPv4+ICMP4 ping probe).'
+    deps: [ministack:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-MINISTACK.EFI" "{{.TASKFILE_DIR}}/app_arm64_ministack.elf"'
+
+  ministack:efi:riscv64:
+    desc: 'Build Phase-2 M3-minimal BOOTRISCV64-MINISTACK.EFI (hand-rolled ARP+IPv4+ICMP4 ping probe).'
+    deps: [ministack:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-MINISTACK.EFI" "{{.TASKFILE_DIR}}/app_riscv64_ministack.elf"'
+
+  ministack:efi:loong64:
+    desc: 'Build Phase-2 M3-minimal BOOTLOONGARCH64-MINISTACK.EFI (hand-rolled ARP+IPv4+ICMP4 ping probe).'
+    deps: [ministack:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-MINISTACK.EFI" "{{.TASKFILE_DIR}}/app_loong64_ministack.elf"'
+
+  ministack:all:
+    desc: 'Build all four Phase-2 M3-minimal ministack ICMP-ping probe EFIs.'
+    cmds:
+      - task: ministack:efi:amd64
+      - task: ministack:efi:arm64
+      - task: ministack:efi:riscv64
+      - task: ministack:efi:loong64
+
+  ministack:test:
+    desc: 'Run host-side ministack unit tests (ARP + IPv4 + ICMP4 + stack dispatch).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -cover -v ./uefiboard/ministack/...
+
+  live:ministack:amd64:
+    desc: 'Live ICMP ping against QEMU NAT 10.0.2.2 from BOOTX64-MINISTACK.EFI under QEMU+EDK2.'
+    deps: [ministack:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveministack/run.sh" amd64'
+
+  live:ministack:arm64:
+    desc: 'Live ICMP ping against QEMU NAT 10.0.2.2 from BOOTAA64-MINISTACK.EFI under QEMU+EDK2.'
+    deps: [ministack:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveministack/run.sh" arm64'
+
+  live:ministack:riscv64:
+    desc: 'Live ICMP ping against QEMU NAT 10.0.2.2 from BOOTRISCV64-MINISTACK.EFI under QEMU+EDK2.'
+    deps: [ministack:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveministack/run.sh" riscv64'
+
+  live:ministack:loong64:
+    desc: 'Live ICMP ping against QEMU NAT 10.0.2.2 from BOOTLOONGARCH64-MINISTACK.EFI under QEMU+EDK2.'
+    deps: [ministack:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveministack/run.sh" loong64'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -593,9 +717,11 @@ tasks:
       - rm -f app_amd64_pcisnp.elf app_arm64_pcisnp.elf app_riscv64_pcisnp.elf app_loong64_pcisnp.elf
       - rm -f app_amd64_blkprintk.elf app_arm64_blkprintk.elf app_riscv64_blkprintk.elf app_loong64_blkprintk.elf
       - rm -f app_amd64_virtionet.elf app_arm64_virtionet.elf app_riscv64_virtionet.elf app_loong64_virtionet.elf
+      - rm -f app_amd64_ministack.elf app_arm64_ministack.elf app_riscv64_ministack.elf app_loong64_ministack.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
       - rm -f BOOTX64-PCISNP.EFI BOOTAA64-PCISNP.EFI BOOTRISCV64-PCISNP.EFI BOOTLOONGARCH64-PCISNP.EFI
       - rm -f BOOTX64-BLKPRINT.EFI BOOTAA64-BLKPRINT.EFI BOOTRISCV64-BLKPRINT.EFI BOOTLOONGARCH64-BLKPRINT.EFI
       - rm -f BOOTX64-VIRTIONET.EFI BOOTAA64-VIRTIONET.EFI BOOTRISCV64-VIRTIONET.EFI BOOTLOONGARCH64-VIRTIONET.EFI
+      - rm -f BOOTX64-MINISTACK.EFI BOOTAA64-MINISTACK.EFI BOOTRISCV64-MINISTACK.EFI BOOTLOONGARCH64-MINISTACK.EFI
