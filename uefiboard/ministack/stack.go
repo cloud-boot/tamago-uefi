@@ -52,9 +52,11 @@ type Stack struct {
 	mu        sync.Mutex
 	arpCache  *arpTable
 	route     RouteTable
-	pings     map[uint32]*pingWaiter // key = (id<<16)|seq
-	udp4Conns map[uint16]*UDP4Conn   // key = local UDP port
-	ipID      uint16                 // monotonic IPv4 identification
+	pings         map[uint32]*pingWaiter // key = (id<<16)|seq
+	udp4Conns     map[uint16]*UDP4Conn   // key = local UDP port
+	tcp4Conns     map[uint16]*TCP4Conn   // key = local TCP port (M5)
+	tcp4PortRover uint16                 // rotating ephemeral-port hint
+	ipID          uint16                 // monotonic IPv4 identification
 	started   bool
 	closed    bool
 	closeOnce sync.Once
@@ -75,6 +77,7 @@ func New(link Link) *Stack {
 		arpCache:   newARPTable(),
 		pings:      make(map[uint32]*pingWaiter),
 		udp4Conns:  make(map[uint16]*UDP4Conn),
+		tcp4Conns:  make(map[uint16]*TCP4Conn),
 		stopCh:     make(chan struct{}),
 		doneCh:     make(chan struct{}),
 		arpTimeout: ARPDefaultTimeout,
@@ -229,6 +232,8 @@ func (s *Stack) handleIPv4(payload []byte) error {
 		return s.handleICMP(h, body)
 	case IPProtoUDP:
 		return s.handleUDP4(h, body)
+	case IPProtoTCP:
+		return s.handleTCP4(h, body)
 	default:
 		return nil
 	}

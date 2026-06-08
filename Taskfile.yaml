@@ -816,6 +816,125 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/livedhcp4/run.sh" loong64'
 
+  # Phase-2 M5 probe builds — DHCP + DNS + HTTP GET over the M5
+  # ministack additions (TCP4 + DNS + HTTP client). Same pipeline as
+  # the M4 dhcp4: tasks but with the `phase2_http_get` tag instead of
+  # `phase2_dhcp4_acquire` (the two share the virtio-net device and
+  # must not run together). The probe acquires a lease, resolves
+  # `example.com` via DHCP-learned DNS, issues a GET against
+  # `http://example.com/`, and prints status + body length.
+  # Outputs go to BOOT<ARCH>-HTTP.EFI.
+  http:elf:amd64:
+    desc: 'Build app_amd64_http.elf (TamaGo PIE, M5 HTTP GET probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_http_get -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_http.elf .'
+
+  http:elf:arm64:
+    desc: 'Build app_arm64_http.elf (TamaGo PIE, M5 HTTP GET probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_http_get -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_http.elf .'
+
+  http:elf:riscv64:
+    desc: 'Build app_riscv64_http.elf (TamaGo PIE, M5 HTTP GET probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_http_get -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_http.elf .'
+
+  http:elf:loong64:
+    desc: 'Build app_loong64_http.elf (TamaGo PIE, M5 HTTP GET probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_http_get -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_http.elf .'
+
+  http:efi:amd64:
+    desc: 'Build Phase-2 M5 BOOTX64-HTTP.EFI (pure-Go DHCP+DNS+HTTP GET probe).'
+    deps: [http:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-HTTP.EFI" "{{.TASKFILE_DIR}}/app_amd64_http.elf"'
+
+  http:efi:arm64:
+    desc: 'Build Phase-2 M5 BOOTAA64-HTTP.EFI (pure-Go DHCP+DNS+HTTP GET probe).'
+    deps: [http:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-HTTP.EFI" "{{.TASKFILE_DIR}}/app_arm64_http.elf"'
+
+  http:efi:riscv64:
+    desc: 'Build Phase-2 M5 BOOTRISCV64-HTTP.EFI (pure-Go DHCP+DNS+HTTP GET probe).'
+    deps: [http:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-HTTP.EFI" "{{.TASKFILE_DIR}}/app_riscv64_http.elf"'
+
+  http:efi:loong64:
+    desc: 'Build Phase-2 M5 BOOTLOONGARCH64-HTTP.EFI (pure-Go DHCP+DNS+HTTP GET probe).'
+    deps: [http:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-HTTP.EFI" "{{.TASKFILE_DIR}}/app_loong64_http.elf"'
+
+  http:all:
+    desc: 'Build all four Phase-2 M5 HTTP GET probe EFIs.'
+    cmds:
+      - task: http:efi:amd64
+      - task: http:efi:arm64
+      - task: http:efi:riscv64
+      - task: http:efi:loong64
+
+  http:test:
+    desc: 'Run host-side ministack unit tests including TCP4 + DNS + HTTP (M5 coverage gate >=80%).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -cover -v ./uefiboard/ministack/...
+
+  live:http:amd64:
+    desc: 'Live HTTP GET against the live internet via QEMU NAT from BOOTX64-HTTP.EFI under QEMU+EDK2.'
+    deps: [http:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livehttp/run.sh" amd64'
+
+  live:http:arm64:
+    desc: 'Live HTTP GET against the live internet via QEMU NAT from BOOTAA64-HTTP.EFI under QEMU+EDK2.'
+    deps: [http:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livehttp/run.sh" arm64'
+
+  live:http:riscv64:
+    desc: 'Live HTTP GET against the live internet via QEMU NAT from BOOTRISCV64-HTTP.EFI under QEMU+EDK2.'
+    deps: [http:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livehttp/run.sh" riscv64'
+
+  live:http:loong64:
+    desc: 'Live HTTP GET against the live internet via QEMU NAT from BOOTLOONGARCH64-HTTP.EFI under QEMU+EDK2.'
+    deps: [http:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livehttp/run.sh" loong64'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -838,6 +957,7 @@ tasks:
       - rm -f app_amd64_virtionet.elf app_arm64_virtionet.elf app_riscv64_virtionet.elf app_loong64_virtionet.elf
       - rm -f app_amd64_ministack.elf app_arm64_ministack.elf app_riscv64_ministack.elf app_loong64_ministack.elf
       - rm -f app_amd64_dhcp4.elf app_arm64_dhcp4.elf app_riscv64_dhcp4.elf app_loong64_dhcp4.elf
+      - rm -f app_amd64_http.elf app_arm64_http.elf app_riscv64_http.elf app_loong64_http.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
@@ -846,3 +966,4 @@ tasks:
       - rm -f BOOTX64-VIRTIONET.EFI BOOTAA64-VIRTIONET.EFI BOOTRISCV64-VIRTIONET.EFI BOOTLOONGARCH64-VIRTIONET.EFI
       - rm -f BOOTX64-MINISTACK.EFI BOOTAA64-MINISTACK.EFI BOOTRISCV64-MINISTACK.EFI BOOTLOONGARCH64-MINISTACK.EFI
       - rm -f BOOTX64-DHCP4.EFI BOOTAA64-DHCP4.EFI BOOTRISCV64-DHCP4.EFI BOOTLOONGARCH64-DHCP4.EFI
+      - rm -f BOOTX64-HTTP.EFI BOOTAA64-HTTP.EFI BOOTRISCV64-HTTP.EFI BOOTLOONGARCH64-HTTP.EFI
