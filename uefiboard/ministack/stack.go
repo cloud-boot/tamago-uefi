@@ -53,6 +53,7 @@ type Stack struct {
 	arpCache  *arpTable
 	route     RouteTable
 	pings     map[uint32]*pingWaiter // key = (id<<16)|seq
+	udp4Conns map[uint16]*UDP4Conn   // key = local UDP port
 	ipID      uint16                 // monotonic IPv4 identification
 	started   bool
 	closed    bool
@@ -73,6 +74,7 @@ func New(link Link) *Stack {
 		link:       link,
 		arpCache:   newARPTable(),
 		pings:      make(map[uint32]*pingWaiter),
+		udp4Conns:  make(map[uint16]*UDP4Conn),
 		stopCh:     make(chan struct{}),
 		doneCh:     make(chan struct{}),
 		arpTimeout: ARPDefaultTimeout,
@@ -218,9 +220,120 @@ func (s *Stack) handleIPv4(payload []byte) error {
 	switch h.Protocol {
 	case IPProtoICMP:
 		return s.handleICMP(h, body)
+	case IPProtoUDP:
+		return s.handleUDP4(h, body)
 	default:
 		return nil
 	}
+}
+
+// handleUDP4 is the UDP arm of dispatch. Parses the UDP header,
+// validates the pseudo-header checksum, finds the Conn bound to the
+// destination port, and enqueues the (src, payload) datagram on the
+// Conn's RX channel. Datagrams to ports with no bound Conn are dropped
+// silently.
+func (s *Stack) handleUDP4(h IPv4Header, body []byte) error {
+	uh, payload, err := ParseUDP4(h.Src, h.Dst, body)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	conn, ok := s.udp4Conns[uh.DstPort]
+	s.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	dg := udp4Datagram{
+		Src: net.UDPAddr{
+			IP:   append(net.IP(nil), h.Src.To4()...),
+			Port: int(uh.SrcPort),
+		},
+		Payload: payload,
+	}
+	conn.deliver(dg)
+	return nil
+}
+
+// OpenUDP4 binds a UDP4Conn on the given local port. Returns
+// ErrUDP4PortInUse if another Conn already holds this port on this
+// Stack.
+func (s *Stack) OpenUDP4(localPort uint16) (*UDP4Conn, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrStackClosed
+	}
+	if _, exists := s.udp4Conns[localPort]; exists {
+		return nil, ErrUDP4PortInUse
+	}
+	conn := &UDP4Conn{
+		stack:     s,
+		localPort: localPort,
+		queue:     make(chan udp4Datagram, udp4QueueDepth),
+	}
+	s.udp4Conns[localPort] = conn
+	return conn, nil
+}
+
+// releaseUDP4 removes the Conn for `localPort` from the demux table.
+// Called by UDP4Conn.Close.
+func (s *Stack) releaseUDP4(localPort uint16) {
+	s.mu.Lock()
+	delete(s.udp4Conns, localPort)
+	s.mu.Unlock()
+}
+
+// sendUDP4 builds and ships a UDP datagram. Used by UDP4Conn.WriteTo.
+// Selects the source IP from the Stack's local address; if no local
+// address has been configured yet (DHCP DISCOVER case), uses 0.0.0.0.
+// The destination 255.255.255.255 is sent via the L2 broadcast MAC
+// without an ARP lookup.
+func (s *Stack) sendUDP4(srcPort, dstPort uint16, dst net.IP, payload []byte) error {
+	d4 := dst.To4()
+	if d4 == nil {
+		return ErrIPv4InvalidIP
+	}
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrStackClosed
+	}
+	var src net.IP
+	if s.route.Local != nil {
+		src = append(net.IP(nil), s.route.Local...)
+	} else {
+		// DHCP DISCOVER ships with 0.0.0.0 as the source.
+		src = net.IPv4(0, 0, 0, 0).To4()
+	}
+	srcMAC := s.link.MAC()
+	s.mu.Unlock()
+
+	udpBytes, err := MarshalUDP4(src, d4, srcPort, dstPort, payload)
+	if err != nil {
+		return err
+	}
+	ipPkt, err := MarshalIPv4(src, d4, IPProtoUDP, s.nextIPID(), udpBytes)
+	if err != nil {
+		return err
+	}
+	// Broadcast short-circuit: 255.255.255.255 → L2 ff:ff:ff:ff:ff:ff,
+	// no ARP. DHCP DISCOVER + REQUEST take this path.
+	if isLimitedBroadcast(d4) {
+		frame, err := MarshalEthernet(BroadcastMAC, srcMAC, EtherTypeIPv4, ipPkt)
+		if err != nil {
+			return err
+		}
+		return s.link.SendFrame(frame)
+	}
+	return s.sendIPv4Frame(d4, ipPkt)
+}
+
+// isLimitedBroadcast reports whether ip is 255.255.255.255.
+func isLimitedBroadcast(ip net.IP) bool {
+	if len(ip) != 4 {
+		return false
+	}
+	return ip[0] == 0xFF && ip[1] == 0xFF && ip[2] == 0xFF && ip[3] == 0xFF
 }
 
 // handleICMP processes an inbound ICMP message. Echo Replies are

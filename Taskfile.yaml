@@ -697,6 +697,125 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/liveministack/run.sh" loong64'
 
+  # Phase-2 M4 probe builds — DHCPv4 acquire over ministack. Same
+  # pipeline as ministack: but with the `phase2_dhcp4_acquire` tag
+  # instead of `phase2_ministack_ping` (the two share the virtio-net
+  # device and must not run together). The probe sends DISCOVER →
+  # OFFER → REQUEST → ACK against QEMU's built-in SLIRP DHCP server,
+  # prints the resulting lease, applies it to the Stack, and pings
+  # the learned gateway to verify end-to-end reachability.
+  # Outputs go to BOOT<ARCH>-DHCP4.EFI.
+  dhcp4:elf:amd64:
+    desc: 'Build app_amd64_dhcp4.elf (TamaGo PIE, M4 DHCPv4 probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_dhcp4_acquire -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_dhcp4.elf .'
+
+  dhcp4:elf:arm64:
+    desc: 'Build app_arm64_dhcp4.elf (TamaGo PIE, M4 DHCPv4 probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_dhcp4_acquire -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_dhcp4.elf .'
+
+  dhcp4:elf:riscv64:
+    desc: 'Build app_riscv64_dhcp4.elf (TamaGo PIE, M4 DHCPv4 probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_dhcp4_acquire -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_dhcp4.elf .'
+
+  dhcp4:elf:loong64:
+    desc: 'Build app_loong64_dhcp4.elf (TamaGo PIE, M4 DHCPv4 probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_dhcp4_acquire -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_dhcp4.elf .'
+
+  dhcp4:efi:amd64:
+    desc: 'Build Phase-2 M4 BOOTX64-DHCP4.EFI (pure-Go DHCPv4 acquire probe).'
+    deps: [dhcp4:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-DHCP4.EFI" "{{.TASKFILE_DIR}}/app_amd64_dhcp4.elf"'
+
+  dhcp4:efi:arm64:
+    desc: 'Build Phase-2 M4 BOOTAA64-DHCP4.EFI (pure-Go DHCPv4 acquire probe).'
+    deps: [dhcp4:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-DHCP4.EFI" "{{.TASKFILE_DIR}}/app_arm64_dhcp4.elf"'
+
+  dhcp4:efi:riscv64:
+    desc: 'Build Phase-2 M4 BOOTRISCV64-DHCP4.EFI (pure-Go DHCPv4 acquire probe).'
+    deps: [dhcp4:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-DHCP4.EFI" "{{.TASKFILE_DIR}}/app_riscv64_dhcp4.elf"'
+
+  dhcp4:efi:loong64:
+    desc: 'Build Phase-2 M4 BOOTLOONGARCH64-DHCP4.EFI (pure-Go DHCPv4 acquire probe).'
+    deps: [dhcp4:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-DHCP4.EFI" "{{.TASKFILE_DIR}}/app_loong64_dhcp4.elf"'
+
+  dhcp4:all:
+    desc: 'Build all four Phase-2 M4 DHCPv4 acquire probe EFIs.'
+    cmds:
+      - task: dhcp4:efi:amd64
+      - task: dhcp4:efi:arm64
+      - task: dhcp4:efi:riscv64
+      - task: dhcp4:efi:loong64
+
+  dhcp4:test:
+    desc: 'Run host-side ministack unit tests including UDP4 + DHCP4 (M4 coverage gate >=80%).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -cover -v ./uefiboard/ministack/...
+
+  live:dhcp4:amd64:
+    desc: 'Live DHCPv4 acquire against QEMU NAT from BOOTX64-DHCP4.EFI under QEMU+EDK2.'
+    deps: [dhcp4:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livedhcp4/run.sh" amd64'
+
+  live:dhcp4:arm64:
+    desc: 'Live DHCPv4 acquire against QEMU NAT from BOOTAA64-DHCP4.EFI under QEMU+EDK2.'
+    deps: [dhcp4:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livedhcp4/run.sh" arm64'
+
+  live:dhcp4:riscv64:
+    desc: 'Live DHCPv4 acquire against QEMU NAT from BOOTRISCV64-DHCP4.EFI under QEMU+EDK2.'
+    deps: [dhcp4:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livedhcp4/run.sh" riscv64'
+
+  live:dhcp4:loong64:
+    desc: 'Live DHCPv4 acquire against QEMU NAT from BOOTLOONGARCH64-DHCP4.EFI under QEMU+EDK2.'
+    deps: [dhcp4:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livedhcp4/run.sh" loong64'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -718,6 +837,7 @@ tasks:
       - rm -f app_amd64_blkprintk.elf app_arm64_blkprintk.elf app_riscv64_blkprintk.elf app_loong64_blkprintk.elf
       - rm -f app_amd64_virtionet.elf app_arm64_virtionet.elf app_riscv64_virtionet.elf app_loong64_virtionet.elf
       - rm -f app_amd64_ministack.elf app_arm64_ministack.elf app_riscv64_ministack.elf app_loong64_ministack.elf
+      - rm -f app_amd64_dhcp4.elf app_arm64_dhcp4.elf app_riscv64_dhcp4.elf app_loong64_dhcp4.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
@@ -725,3 +845,4 @@ tasks:
       - rm -f BOOTX64-BLKPRINT.EFI BOOTAA64-BLKPRINT.EFI BOOTRISCV64-BLKPRINT.EFI BOOTLOONGARCH64-BLKPRINT.EFI
       - rm -f BOOTX64-VIRTIONET.EFI BOOTAA64-VIRTIONET.EFI BOOTRISCV64-VIRTIONET.EFI BOOTLOONGARCH64-VIRTIONET.EFI
       - rm -f BOOTX64-MINISTACK.EFI BOOTAA64-MINISTACK.EFI BOOTRISCV64-MINISTACK.EFI BOOTLOONGARCH64-MINISTACK.EFI
+      - rm -f BOOTX64-DHCP4.EFI BOOTAA64-DHCP4.EFI BOOTRISCV64-DHCP4.EFI BOOTLOONGARCH64-DHCP4.EFI

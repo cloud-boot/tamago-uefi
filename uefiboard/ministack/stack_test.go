@@ -247,14 +247,15 @@ func TestStackDispatchPropagatesEthernetError(t *testing.T) {
 	}
 }
 
-func TestStackDispatchIPv4DropsNonICMP(t *testing.T) {
+func TestStackDispatchIPv4DropsUnknownProto(t *testing.T) {
 	link := newStubLink(net.HardwareAddr{1, 2, 3, 4, 5, 6})
 	s := New(link)
-	// Build an IPv4 packet with proto=UDP. M3 drops silently.
-	ip, _ := MarshalIPv4(net.IPv4(10, 0, 2, 2), net.IPv4(10, 0, 2, 15), IPProtoUDP, 0, []byte("udp"))
+	// Build an IPv4 packet with proto=TCP. Ministack only knows ICMP
+	// and UDP — TCP is dispatched-but-dropped silently in M4.
+	ip, _ := MarshalIPv4(net.IPv4(10, 0, 2, 2), net.IPv4(10, 0, 2, 15), IPProtoTCP, 0, []byte("tcp"))
 	frame, _ := MarshalEthernet(net.HardwareAddr{1, 2, 3, 4, 5, 6}, net.HardwareAddr{2, 2, 2, 2, 2, 2}, EtherTypeIPv4, ip)
 	if err := s.dispatch(frame); err != nil {
-		t.Errorf("UDP should drop silently, got %v", err)
+		t.Errorf("TCP should drop silently, got %v", err)
 	}
 }
 
