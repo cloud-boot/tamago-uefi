@@ -722,7 +722,7 @@ tasks:
         fi
       - |
         vfkit --memory 1024 --cpus 1 \
-          --bootloader efi,variable-store={{.NVRAM}} \
+          --bootloader efi,variable-store={{.NVRAM}},create=true \
           --device virtio-blk,path={{.ESP}},readonly \
           --device virtio-blk,path={{.SCRATCH}} \
           --device virtio-net,nat \
