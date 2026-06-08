@@ -663,6 +663,81 @@ tasks:
       - task: postebs:efi:riscv64
       - task: postebs:efi:loong64
 
+  # live:vz:m2b — reproduce the M2-B (post-ExitBootServices virtio-net)
+  # live VZ experiment end-to-end: build the arm64 EFI, stage an ESP +
+  # scratch disk, optionally arm a sudo tcpdump on the host bridge to
+  # catch the post-EBS ARP marker, boot under vfkit, and report both
+  # the pre-EBS blkprintk dump and the ARP capture verdict.
+  #
+  # The probe transmits a recognizable ARP request after EBS:
+  #   src IP   = 169.254.2.66
+  #   dst IP   = 169.254.99.99    (RFC 3927 link-local; M2B marker)
+  #   src MAC  = the device MAC vfkit assigned
+  # Look for those bytes in /tmp/m2b-arp.pcap (or run with
+  # SUDO_CAPTURE=1 to have the task spawn tcpdump itself).
+  #
+  # Prereqs:
+  #   - vfkit (brew install vfkit)
+  #   - mtools + dosfstools (brew install mtools dosfstools)
+  #   - SUDO_CAPTURE=1 → interactive sudo password for tcpdump on bridge
+  #   - BRIDGE override if vfkit uses a non-default bridge (e.g. bridge101)
+  #
+  # Override knobs: SCRATCH, ESP, NVRAM, LOG, PCAP, BRIDGE, TIMEOUT,
+  # SUDO_CAPTURE.
+  live:vz:m2b:
+    desc: 'Run M2-B (post-EBS) live on Apple VZ via vfkit; capture pre-EBS scratch + post-EBS ARP (SUDO_CAPTURE=1 for tcpdump).'
+    deps: [postebs:efi:arm64]
+    vars:
+      SCRATCH:      '{{.SCRATCH | default "/tmp/m2b-scratch.img"}}'
+      ESP:          '{{.ESP | default "/tmp/m2b-esp.img"}}'
+      NVRAM:        '{{.NVRAM | default "/tmp/m2b-nvram.fd"}}'
+      LOG:          '{{.LOG | default "/tmp/m2b-vfkit.log"}}'
+      PCAP:         '{{.PCAP | default "/tmp/m2b-arp.pcap"}}'
+      BRIDGE:       '{{.BRIDGE | default "bridge100"}}'
+      TIMEOUT:      '{{.TIMEOUT | default "30"}}'
+      SUDO_CAPTURE: '{{.SUDO_CAPTURE | default ""}}'
+    cmds:
+      - 'rm -f {{.NVRAM}} {{.LOG}} {{.PCAP}}'
+      - 'dd if=/dev/zero of={{.SCRATCH}} bs=1m count=1 status=none'
+      - 'dd if=/dev/zero of={{.ESP}} bs=1m count=16 status=none'
+      - 'mformat -i {{.ESP}} -v CLOUDBOOTB'
+      - 'mmd -i {{.ESP}} ::/EFI'
+      - 'mmd -i {{.ESP}} ::/EFI/BOOT'
+      - 'mcopy -i {{.ESP}} {{.TASKFILE_DIR}}/BOOTAA64-VIRTIONETB.EFI ::/EFI/BOOT/BOOTAA64.EFI'
+      - |
+        if [ -n "{{.SUDO_CAPTURE}}" ]; then
+          echo "arming sudo tcpdump on {{.BRIDGE}} -> {{.PCAP}}  (you may be prompted for your password)"
+          sudo -v
+          sudo tcpdump -i {{.BRIDGE}} -n -w {{.PCAP}} arp >/dev/null 2>&1 &
+          echo $! > /tmp/m2b-tcpdump.pid
+          sleep 1
+        else
+          echo "skipping tcpdump capture (run with SUDO_CAPTURE=1 to enable)"
+        fi
+      - |
+        vfkit --memory 1024 --cpus 1 \
+          --bootloader efi,variable-store={{.NVRAM}} \
+          --device virtio-blk,path={{.ESP}},readonly \
+          --device virtio-blk,path={{.SCRATCH}} \
+          --device virtio-net,nat,mac=auto \
+          --device virtio-serial,logFilePath={{.LOG}} \
+          --log-level debug --timeout {{.TIMEOUT}} 2>&1 | tee {{.LOG}}.stdout || echo "(vfkit timeout/exit $?)"
+      - |
+        if [ -n "{{.SUDO_CAPTURE}}" ] && [ -s /tmp/m2b-tcpdump.pid ]; then
+          sleep 1
+          sudo kill -INT "$(cat /tmp/m2b-tcpdump.pid)" 2>/dev/null || true
+          sleep 1
+          rm -f /tmp/m2b-tcpdump.pid
+          echo "--- ARP capture on {{.BRIDGE}} ({{.PCAP}}) ---"
+          sudo tcpdump -nn -r {{.PCAP}} arp 2>/dev/null | grep -E "169.254.2.66|169.254.99.99" || echo "no M2B! marker ARP found"
+        fi
+      - 'echo "--- recovered blkprintk pre-EBS scratch ({{.SCRATCH}}) ---"'
+      - 'cd "{{.TASKFILE_DIR}}" && go run ./cmd/blkprintk-recover {{.SCRATCH}}'
+      - 'echo "--- M2-B verdict signals to look for ---"'
+      - 'echo "  PASS = pre-EBS dump reaches \"ExitToBareMetal\" + ARP marker captured on bridge"'
+      - 'echo "  PARTIAL = pre-EBS reaches end but no marker (sudo tcpdump skipped or device gated post-EBS)"'
+      - 'echo "  FAIL = pre-EBS aborts before EBS (capture / EBS itself broken)"'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
