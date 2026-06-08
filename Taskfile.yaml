@@ -935,6 +935,126 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/livehttp/run.sh" loong64'
 
+  # ----- M6 — HTTPS GET probe (TLS over ministack TCP4) -----------
+  # Same pipeline as M5 http: but with the `phase2_https_get` tag
+  # which links in `crypto/tls` + `crypto/x509` and the embedded CA
+  # bundle (uefiboard/ministack/ca_bundle.pem). The probe acquires a
+  # lease, resolves `example.com` via DHCP-learned DNS, dials TCP/443,
+  # wraps the conn in tls.Client with verification against the
+  # embedded roots, issues GET https://example.com/, and prints
+  # status + Content-Length + first 64 body bytes.
+  # Outputs go to BOOT<ARCH>-HTTPS.EFI.
+  https:elf:amd64:
+    desc: 'Build app_amd64_https.elf (TamaGo PIE, M6 HTTPS GET probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_https_get -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_https.elf .'
+
+  https:elf:arm64:
+    desc: 'Build app_arm64_https.elf (TamaGo PIE, M6 HTTPS GET probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_https_get -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_https.elf .'
+
+  https:elf:riscv64:
+    desc: 'Build app_riscv64_https.elf (TamaGo PIE, M6 HTTPS GET probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_https_get -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_https.elf .'
+
+  https:elf:loong64:
+    desc: 'Build app_loong64_https.elf (TamaGo PIE, M6 HTTPS GET probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_https_get -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_https.elf .'
+
+  https:efi:amd64:
+    desc: 'Build Phase-2 M6 BOOTX64-HTTPS.EFI (pure-Go DHCP+DNS+TLS+HTTPS GET probe).'
+    deps: [https:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-HTTPS.EFI" "{{.TASKFILE_DIR}}/app_amd64_https.elf"'
+
+  https:efi:arm64:
+    desc: 'Build Phase-2 M6 BOOTAA64-HTTPS.EFI (pure-Go DHCP+DNS+TLS+HTTPS GET probe).'
+    deps: [https:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-HTTPS.EFI" "{{.TASKFILE_DIR}}/app_arm64_https.elf"'
+
+  https:efi:riscv64:
+    desc: 'Build Phase-2 M6 BOOTRISCV64-HTTPS.EFI (pure-Go DHCP+DNS+TLS+HTTPS GET probe).'
+    deps: [https:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-HTTPS.EFI" "{{.TASKFILE_DIR}}/app_riscv64_https.elf"'
+
+  https:efi:loong64:
+    desc: 'Build Phase-2 M6 BOOTLOONGARCH64-HTTPS.EFI (pure-Go DHCP+DNS+TLS+HTTPS GET probe).'
+    deps: [https:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-HTTPS.EFI" "{{.TASKFILE_DIR}}/app_loong64_https.elf"'
+
+  https:all:
+    desc: 'Build all four Phase-2 M6 HTTPS GET probe EFIs.'
+    cmds:
+      - task: https:efi:amd64
+      - task: https:efi:arm64
+      - task: https:efi:riscv64
+      - task: https:efi:loong64
+
+  https:test:
+    desc: 'Run host-side ministack unit tests including TLS + HTTPS + CA bundle (M6 coverage gate >=80%).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -cover -v ./uefiboard/ministack/...
+
+  live:https:amd64:
+    desc: 'Live HTTPS GET against the live internet via QEMU NAT from BOOTX64-HTTPS.EFI under QEMU+EDK2.'
+    deps: [https:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livehttps/run.sh" amd64'
+
+  live:https:arm64:
+    desc: 'Live HTTPS GET against the live internet via QEMU NAT from BOOTAA64-HTTPS.EFI under QEMU+EDK2.'
+    deps: [https:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livehttps/run.sh" arm64'
+
+  live:https:riscv64:
+    desc: 'Live HTTPS GET against the live internet via QEMU NAT from BOOTRISCV64-HTTPS.EFI under QEMU+EDK2.'
+    deps: [https:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livehttps/run.sh" riscv64'
+
+  live:https:loong64:
+    desc: 'Live HTTPS GET against the live internet via QEMU NAT from BOOTLOONGARCH64-HTTPS.EFI under QEMU+EDK2.'
+    deps: [https:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livehttps/run.sh" loong64'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -958,6 +1078,7 @@ tasks:
       - rm -f app_amd64_ministack.elf app_arm64_ministack.elf app_riscv64_ministack.elf app_loong64_ministack.elf
       - rm -f app_amd64_dhcp4.elf app_arm64_dhcp4.elf app_riscv64_dhcp4.elf app_loong64_dhcp4.elf
       - rm -f app_amd64_http.elf app_arm64_http.elf app_riscv64_http.elf app_loong64_http.elf
+      - rm -f app_amd64_https.elf app_arm64_https.elf app_riscv64_https.elf app_loong64_https.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
@@ -967,3 +1088,4 @@ tasks:
       - rm -f BOOTX64-MINISTACK.EFI BOOTAA64-MINISTACK.EFI BOOTRISCV64-MINISTACK.EFI BOOTLOONGARCH64-MINISTACK.EFI
       - rm -f BOOTX64-DHCP4.EFI BOOTAA64-DHCP4.EFI BOOTRISCV64-DHCP4.EFI BOOTLOONGARCH64-DHCP4.EFI
       - rm -f BOOTX64-HTTP.EFI BOOTAA64-HTTP.EFI BOOTRISCV64-HTTP.EFI BOOTLOONGARCH64-HTTP.EFI
+      - rm -f BOOTX64-HTTPS.EFI BOOTAA64-HTTPS.EFI BOOTRISCV64-HTTPS.EFI BOOTLOONGARCH64-HTTPS.EFI
