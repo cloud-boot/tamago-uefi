@@ -698,7 +698,7 @@ tasks:
       - 'mcopy -i {{.ESP}} {{.TASKFILE_DIR}}/BOOTAA64-VIRTIONETP.EFI ::/EFI/BOOT/BOOTAA64.EFI'
       - |
         vfkit --memory 1024 --cpus 1 \
-          --bootloader efi,variable-store={{.NVRAM}} \
+          --bootloader efi,variable-store={{.NVRAM}},create=true \
           --device virtio-blk,path={{.ESP}},readonly \
           --device virtio-blk,path={{.SCRATCH}} \
           --device virtio-net,nat \
