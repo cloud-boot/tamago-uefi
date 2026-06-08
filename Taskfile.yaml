@@ -669,6 +669,47 @@ tasks:
       - task: virtionetp:efi:riscv64
       - task: virtionetp:efi:loong64
 
+  # live:vz:m2a — reproduce the M2-A (RING_PACKED virtqueue) live VZ
+  # experiment end-to-end: build the arm64 EFI, stage an ESP + scratch
+  # disk, boot under vfkit, recover the blkprintk side-channel and
+  # report the FEATURES_OK / packed-ring TX completion outcome.
+  #
+  # Prereqs: vfkit (brew install vfkit), mtools (brew install mtools),
+  # dosfstools (mformat). Block-IO observability is via the scratch
+  # virtio-blk; no sudo needed (M2-A's signal is entirely on disk).
+  #
+  # Override knobs (Taskfile vars): SCRATCH, ESP, NVRAM, LOG, TIMEOUT.
+  live:vz:m2a:
+    desc: 'Run M2-A (packed-ring) live on Apple VZ via vfkit; recover scratch + report.'
+    deps: [virtionetp:efi:arm64]
+    vars:
+      SCRATCH: '{{.SCRATCH | default "/tmp/m2a-scratch.img"}}'
+      ESP:     '{{.ESP | default "/tmp/m2a-esp.img"}}'
+      NVRAM:   '{{.NVRAM | default "/tmp/m2a-nvram.fd"}}'
+      LOG:     '{{.LOG | default "/tmp/m2a-vfkit.log"}}'
+      TIMEOUT: '{{.TIMEOUT | default "30"}}'
+    cmds:
+      - 'rm -f {{.NVRAM}} {{.LOG}}'
+      - 'dd if=/dev/zero of={{.SCRATCH}} bs=1m count=1 status=none'
+      - 'dd if=/dev/zero of={{.ESP}} bs=1m count=16 status=none'
+      - 'mformat -i {{.ESP}} -v CLOUDBOOTA'
+      - 'mmd -i {{.ESP}} ::/EFI'
+      - 'mmd -i {{.ESP}} ::/EFI/BOOT'
+      - 'mcopy -i {{.ESP}} {{.TASKFILE_DIR}}/BOOTAA64-VIRTIONETP.EFI ::/EFI/BOOT/BOOTAA64.EFI'
+      - |
+        vfkit --memory 1024 --cpus 1 \
+          --bootloader efi,variable-store={{.NVRAM}} \
+          --device virtio-blk,path={{.ESP}},readonly \
+          --device virtio-blk,path={{.SCRATCH}} \
+          --device virtio-net,nat,mac=auto \
+          --device virtio-serial,logFilePath={{.LOG}} \
+          --log-level debug --timeout {{.TIMEOUT}} 2>&1 | tee {{.LOG}}.stdout || echo "(vfkit timeout/exit $?)"
+      - 'echo "--- recovered blkprintk scratch ({{.SCRATCH}}) ---"'
+      - 'cd "{{.TASKFILE_DIR}}" && go run ./cmd/blkprintk-recover {{.SCRATCH}}'
+      - 'echo "--- M2-A verdict signals to look for ---"'
+      - 'echo "  PASS = used-flag flips on TX descriptor + RX ARP reply text"'
+      - 'echo "  FAIL = AVAIL=1, USED=0 forever (current Case IV signature)"'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
