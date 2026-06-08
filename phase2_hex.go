@@ -8,7 +8,7 @@
 // its own build-tag for the live probe body, so this file's
 // `package main` symbols are consistent.
 
-//go:build phase2_pcienum || phase2_snpenum || phase2_blkprintk || phase2_virtionet_tx
+//go:build phase2_pcienum || phase2_snpenum || phase2_blkprintk || phase2_virtionet_tx || phase2_netstack_ping
 
 package main
 

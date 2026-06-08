@@ -573,6 +573,164 @@ tasks:
       - task: virtionet:efi:riscv64
       - task: virtionet:efi:loong64
 
+  # Phase-2 M3 probe builds — gvisor netstack
+  # (`gvisor.dev/gvisor/pkg/tcpip`) over the M2 virtio-net rail.
+  # The probe brings up the device, attaches a
+  # `*VirtioNetLink` (uefiboard/netstack_link.go) to a
+  # `stack.Stack` configured with IPv4 + ARP + ICMP4 + UDP,
+  # assigns 10.0.2.15/24 (QEMU NAT default), sets a default
+  # route via 10.0.2.2, and sends one ICMP Echo Request to
+  # the gateway. The Echo Reply is captured via the link's
+  # RX goroutine, the IPv4/ICMP stack hands it to the
+  # endpoint, and the probe prints "ROUND-TRIP OK".
+  #
+  # The `phase2_netstack_ping` tag gates both the probe's
+  # `runNetstackPingProbe()` body AND the
+  # `uefiboard.VirtioNetLink` adapter — without the tag the
+  # gvisor import set stays out of the dep closure, so the
+  # default Phase-1 build (and the M2 `phase2_virtionet_tx`
+  # build) are unchanged. The `phase2_blkprintk` tag stays
+  # set so the Block-IO side-channel teeing is available for
+  # observability if needed.
+  #
+  # loong64 is intentionally OMITTED — tamago-pie ships no
+  # `zsyscall_tamago_loong64.go`, and gvisor's `pkg/log`
+  # transitively imports `os`/`syscall`, which fails to link
+  # at `fd_tamago.go: undefined: write`. This is a tamago
+  # overlay gap (R-M3'b), NOT a gvisor problem. M3 ships
+  # 3/4 arches as PASS until tamago closes that overlay.
+  netstack:elf:amd64:
+    desc: 'Build app_amd64_netstack.elf (TamaGo PIE, M3 gvisor-netstack ping).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_blkprintk,phase2_netstack_ping -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_netstack.elf .'
+
+  netstack:elf:arm64:
+    desc: 'Build app_arm64_netstack.elf (TamaGo PIE, M3 gvisor-netstack ping).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_blkprintk,phase2_netstack_ping -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_netstack.elf .'
+
+  netstack:elf:riscv64:
+    desc: 'Build app_riscv64_netstack.elf (TamaGo PIE, M3 gvisor-netstack ping).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_blkprintk,phase2_netstack_ping -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_netstack.elf .'
+
+  netstack:efi:amd64:
+    desc: 'Build Phase-2 M3 BOOTX64-NETSTACK.EFI (gvisor netstack ICMP ping).'
+    deps: [netstack:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-NETSTACK.EFI" "{{.TASKFILE_DIR}}/app_amd64_netstack.elf"'
+
+  netstack:efi:arm64:
+    desc: 'Build Phase-2 M3 BOOTAA64-NETSTACK.EFI (gvisor netstack ICMP ping).'
+    deps: [netstack:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-NETSTACK.EFI" "{{.TASKFILE_DIR}}/app_arm64_netstack.elf"'
+
+  netstack:efi:riscv64:
+    desc: 'Build Phase-2 M3 BOOTRISCV64-NETSTACK.EFI (gvisor netstack ICMP ping).'
+    deps: [netstack:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-NETSTACK.EFI" "{{.TASKFILE_DIR}}/app_riscv64_netstack.elf"'
+
+  netstack:all:
+    desc: "Build all three Phase-2 M3 gvisor-netstack EFIs (loong64 blocked by R-M3'b)."
+    cmds:
+      - task: netstack:efi:amd64
+      - task: netstack:efi:arm64
+      - task: netstack:efi:riscv64
+
+  netstack:test:
+    desc: 'Run host-side unit tests for the VirtioNetLink LinkEndpoint adapter (phase2_netstack_ping tag).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -v -tags phase2_netstack_ping ./uefiboard/ -run VirtioNetLink
+
+  # Phase-2 M3 live-ping targets. Boot the netstack EFI under
+  # qemu-system-<arch> with EDK2 firmware + user-mode networking
+  # + a virtio-net-pci device, capture stdout (which includes
+  # ConOut output via the firmware's serial-stdio bridge), and
+  # match on "ROUND-TRIP OK" / "probe PASS".
+  #
+  # An ESP image (FAT) carries the EFI; QEMU mounts it as a
+  # USB-storage drive (riscv64 uses virtio-blk-device because
+  # the virt machine differs). The user-mode (`-netdev user`)
+  # network gives the guest 10.0.2.0/24 with 10.0.2.2 as the
+  # NAT gateway — which is exactly what the M3 probe is
+  # configured for. No host privileges needed.
+  #
+  # CLOUDBOOT_OVMF_<ARCH>_CODE points at the EDK2 .fd. If
+  # unset, the targets default to pkgx's pinned location
+  # ($HOME/.pkgx/qemu.org/v9.2.0/share/qemu).
+  live:netstack:ping:amd64:
+    desc: 'Boot BOOTX64-NETSTACK.EFI under QEMU+EDK2 amd64 with user-mode NAT; expect "ROUND-TRIP OK".'
+    deps: [netstack:efi:amd64]
+    env:
+      CLOUDBOOT_OVMF_AMD64_CODE:
+        sh: |
+          if [ -n "$CLOUDBOOT_OVMF_AMD64_CODE" ]; then echo "$CLOUDBOOT_OVMF_AMD64_CODE";
+          else echo "$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-x86_64-code.fd"; fi
+      CLOUDBOOT_OVMF_AMD64_VARS:
+        sh: |
+          if [ -n "$CLOUDBOOT_OVMF_AMD64_VARS" ]; then echo "$CLOUDBOOT_OVMF_AMD64_VARS";
+          else echo "$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-i386-vars.fd"; fi
+    cmds:
+      - 'bash internal/livenetstack/run.sh amd64'
+
+  live:netstack:ping:arm64:
+    desc: 'Boot BOOTAA64-NETSTACK.EFI under QEMU+EDK2 arm64 with user-mode NAT; expect "ROUND-TRIP OK".'
+    deps: [netstack:efi:arm64]
+    env:
+      CLOUDBOOT_OVMF_ARM64_CODE:
+        sh: |
+          if [ -n "$CLOUDBOOT_OVMF_ARM64_CODE" ]; then echo "$CLOUDBOOT_OVMF_ARM64_CODE";
+          else echo "$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-aarch64-code.fd"; fi
+    cmds:
+      - 'bash internal/livenetstack/run.sh arm64'
+
+  live:netstack:ping:riscv64:
+    desc: 'Boot BOOTRISCV64-NETSTACK.EFI under QEMU+EDK2 riscv64 with user-mode NAT; expect "ROUND-TRIP OK".'
+    deps: [netstack:efi:riscv64]
+    env:
+      CLOUDBOOT_OVMF_RISCV64_CODE:
+        sh: |
+          if [ -n "$CLOUDBOOT_OVMF_RISCV64_CODE" ]; then echo "$CLOUDBOOT_OVMF_RISCV64_CODE";
+          else echo "$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-riscv-code.fd"; fi
+      CLOUDBOOT_OVMF_RISCV64_VARS:
+        sh: |
+          if [ -n "$CLOUDBOOT_OVMF_RISCV64_VARS" ]; then echo "$CLOUDBOOT_OVMF_RISCV64_VARS";
+          else echo "$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-riscv-vars.fd"; fi
+    cmds:
+      - 'bash internal/livenetstack/run.sh riscv64'
+
+  live:netstack:all:
+    desc: 'Run the live netstack-ping smoke on amd64, arm64, riscv64 in sequence.'
+    cmds:
+      - task: live:netstack:ping:amd64
+      - task: live:netstack:ping:arm64
+      - task: live:netstack:ping:riscv64
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -599,3 +757,5 @@ tasks:
       - rm -f BOOTX64-PCISNP.EFI BOOTAA64-PCISNP.EFI BOOTRISCV64-PCISNP.EFI BOOTLOONGARCH64-PCISNP.EFI
       - rm -f BOOTX64-BLKPRINT.EFI BOOTAA64-BLKPRINT.EFI BOOTRISCV64-BLKPRINT.EFI BOOTLOONGARCH64-BLKPRINT.EFI
       - rm -f BOOTX64-VIRTIONET.EFI BOOTAA64-VIRTIONET.EFI BOOTRISCV64-VIRTIONET.EFI BOOTLOONGARCH64-VIRTIONET.EFI
+      - rm -f app_amd64_netstack.elf app_arm64_netstack.elf app_riscv64_netstack.elf
+      - rm -f BOOTX64-NETSTACK.EFI BOOTAA64-NETSTACK.EFI BOOTRISCV64-NETSTACK.EFI
