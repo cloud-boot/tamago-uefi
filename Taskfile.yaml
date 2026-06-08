@@ -697,7 +697,11 @@ tasks:
       TIMEOUT:      '{{.TIMEOUT | default "30"}}'
       SUDO_CAPTURE: '{{.SUDO_CAPTURE | default ""}}'
     cmds:
-      - 'rm -f {{.NVRAM}} {{.LOG}} {{.PCAP}}'
+      - |
+        rm -f {{.NVRAM}} {{.LOG}}
+        if [ -f {{.PCAP}} ]; then
+          if [ -w {{.PCAP}} ]; then rm -f {{.PCAP}}; else sudo rm -f {{.PCAP}}; fi
+        fi
       - 'dd if=/dev/zero of={{.SCRATCH}} bs=1m count=1 status=none'
       - 'dd if=/dev/zero of={{.ESP}} bs=1m count=16 status=none'
       - 'mformat -i {{.ESP}} -v CLOUDBOOTB'
