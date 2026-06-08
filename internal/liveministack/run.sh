@@ -134,7 +134,7 @@ case "$ARCH" in
             -drive "file=$ESP,format=raw,if=none,id=esp,media=disk"
             -device "ide-hd,drive=esp"
             -netdev "user,id=net0"
-            -device "virtio-net-pci,netdev=net0,bus=pcie.0,addr=03.0"
+            -device "virtio-net-pci,netdev=net0,bus=pcie.0,addr=03.0,disable-legacy=on,disable-modern=off"
             -serial stdio
         )
         ;;
@@ -146,7 +146,7 @@ case "$ARCH" in
             -drive "file=$ESP,format=raw,if=none,id=esp"
             -device "virtio-blk-pci,drive=esp"
             -netdev "user,id=net0"
-            -device "virtio-net-pci,netdev=net0"
+            -device "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off"
             -serial stdio
         )
         ;;
@@ -160,7 +160,7 @@ case "$ARCH" in
             -drive "file=$ESP,format=raw,if=none,id=esp"
             -device "virtio-blk-device,drive=esp"
             -netdev "user,id=net0"
-            -device "virtio-net-pci,netdev=net0"
+            -device "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off"
             -serial stdio
         )
         ;;
@@ -174,7 +174,7 @@ case "$ARCH" in
             -drive "file=$ESP,format=raw,if=none,id=esp"
             -device "virtio-blk-pci,drive=esp"
             -netdev "user,id=net0"
-            -device "virtio-net-pci,netdev=net0"
+            -device "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off"
             -serial stdio
         )
         ;;
@@ -183,15 +183,19 @@ esac
 echo "[live-ministack:$ARCH] launching $QEMU_BIN (timeout ${TIMEOUT_SECONDS}s)" >&2
 LOG="$WORK/qemu.log"
 START_NS="$(date +%s%N)"
-# Run QEMU under a wall-clock cap; we don't need the SIGTERM
-# graceful path because the probe halts in a spin loop on
-# success/failure. macOS doesn't ship GNU coreutils `timeout`,
-# so we drive the cap with a background sleep killer.
-"$QEMU_BIN" "${QEMU_ARGS[@]}" 2>&1 | tee "$LOG" &
+# Run QEMU under a wall-clock cap. macOS doesn't ship GNU coreutils
+# `timeout`, so we drive the cap with a background sleep killer.
+# NOTE: do NOT pipe through `tee` — \$! returns tee's PID, not QEMU's,
+# and the watchdog ends up killing tee while QEMU keeps running
+# forever. Same bug we hit on the M2-B live runner. Redirect QEMU
+# directly to the logfile; user can tail -f \$LOG in another terminal.
+"$QEMU_BIN" "${QEMU_ARGS[@]}" >"$LOG" 2>&1 &
 QEMU_PID=$!
 ( sleep "$TIMEOUT_SECONDS" && kill -TERM "$QEMU_PID" 2>/dev/null && sleep 1 && kill -KILL "$QEMU_PID" 2>/dev/null ) &
 KILLER_PID=$!
-wait "$QEMU_PID" 2>/dev/null || true
+# Poll for QEMU exit (kill -0 probe) — `wait` may not work when the
+# shell loses job-control tracking under task/interactive contexts.
+while kill -0 "$QEMU_PID" 2>/dev/null; do sleep 1; done
 kill "$KILLER_PID" 2>/dev/null || true
 END_NS="$(date +%s%N)"
 ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
