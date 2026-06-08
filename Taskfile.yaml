@@ -1055,6 +1055,127 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/livehttps/run.sh" loong64'
 
+  # ----- M7 — OCI registry client probe (pure-Go) -----------------
+  # Same pipeline as M6 https: but with the `phase2_oci_fetch` tag
+  # which layers the pure-Go OCI Distribution v2 client on top of the
+  # M6 HTTPS transport. The probe acquires a lease, resolves the
+  # registry hostname, walks the full /v2/<repo>/manifests/<ref> →
+  # token → index → manifest → blob path against a multi-arch public
+  # artifact (ghcr.io/linuxcontainers/alpine:latest), verifies every
+  # blob's SHA-256 against its descriptor, and prints the resolved
+  # digests + layer previews.
+  # Outputs go to BOOT<ARCH>-OCI.EFI.
+  oci:elf:amd64:
+    desc: 'Build app_amd64_oci.elf (TamaGo PIE, M7 OCI fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_oci.elf .'
+
+  oci:elf:arm64:
+    desc: 'Build app_arm64_oci.elf (TamaGo PIE, M7 OCI fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_oci.elf .'
+
+  oci:elf:riscv64:
+    desc: 'Build app_riscv64_oci.elf (TamaGo PIE, M7 OCI fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_oci.elf .'
+
+  oci:elf:loong64:
+    desc: 'Build app_loong64_oci.elf (TamaGo PIE, M7 OCI fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_oci.elf .'
+
+  oci:efi:amd64:
+    desc: 'Build Phase-2 M7 BOOTX64-OCI.EFI (pure-Go OCI registry fetch probe).'
+    deps: [oci:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-OCI.EFI" "{{.TASKFILE_DIR}}/app_amd64_oci.elf"'
+
+  oci:efi:arm64:
+    desc: 'Build Phase-2 M7 BOOTAA64-OCI.EFI (pure-Go OCI registry fetch probe).'
+    deps: [oci:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-OCI.EFI" "{{.TASKFILE_DIR}}/app_arm64_oci.elf"'
+
+  oci:efi:riscv64:
+    desc: 'Build Phase-2 M7 BOOTRISCV64-OCI.EFI (pure-Go OCI registry fetch probe).'
+    deps: [oci:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-OCI.EFI" "{{.TASKFILE_DIR}}/app_riscv64_oci.elf"'
+
+  oci:efi:loong64:
+    desc: 'Build Phase-2 M7 BOOTLOONGARCH64-OCI.EFI (pure-Go OCI registry fetch probe).'
+    deps: [oci:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-OCI.EFI" "{{.TASKFILE_DIR}}/app_loong64_oci.elf"'
+
+  oci:all:
+    desc: 'Build all four Phase-2 M7 OCI fetch probe EFIs.'
+    cmds:
+      - task: oci:efi:amd64
+      - task: oci:efi:arm64
+      - task: oci:efi:riscv64
+      - task: oci:efi:loong64
+
+  oci:test:
+    desc: 'Run host-side ministack unit tests including OCI (M7 coverage gate >=80%).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -cover -v ./uefiboard/ministack/...
+
+  live:oci:amd64:
+    desc: 'Live OCI artifact fetch against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTX64-OCI.EFI under QEMU+EDK2.'
+    deps: [oci:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveoci/run.sh" amd64'
+
+  live:oci:arm64:
+    desc: 'Live OCI artifact fetch against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTAA64-OCI.EFI under QEMU+EDK2.'
+    deps: [oci:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveoci/run.sh" arm64'
+
+  live:oci:riscv64:
+    desc: 'Live OCI artifact fetch against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTRISCV64-OCI.EFI under QEMU+EDK2.'
+    deps: [oci:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveoci/run.sh" riscv64'
+
+  live:oci:loong64:
+    desc: 'Live OCI artifact fetch against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTLOONGARCH64-OCI.EFI under QEMU+EDK2.'
+    deps: [oci:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveoci/run.sh" loong64'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -1079,6 +1200,7 @@ tasks:
       - rm -f app_amd64_dhcp4.elf app_arm64_dhcp4.elf app_riscv64_dhcp4.elf app_loong64_dhcp4.elf
       - rm -f app_amd64_http.elf app_arm64_http.elf app_riscv64_http.elf app_loong64_http.elf
       - rm -f app_amd64_https.elf app_arm64_https.elf app_riscv64_https.elf app_loong64_https.elf
+      - rm -f app_amd64_oci.elf app_arm64_oci.elf app_riscv64_oci.elf app_loong64_oci.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
       - rm -f BOOTX64-PROBE.EFI BOOTAA64-PROBE.EFI BOOTRISCV64-PROBE.EFI BOOTLOONGARCH64-PROBE.EFI
       - rm -f BOOTX64-PCIENUM.EFI BOOTAA64-PCIENUM.EFI BOOTRISCV64-PCIENUM.EFI BOOTLOONGARCH64-PCIENUM.EFI
@@ -1089,3 +1211,4 @@ tasks:
       - rm -f BOOTX64-DHCP4.EFI BOOTAA64-DHCP4.EFI BOOTRISCV64-DHCP4.EFI BOOTLOONGARCH64-DHCP4.EFI
       - rm -f BOOTX64-HTTP.EFI BOOTAA64-HTTP.EFI BOOTRISCV64-HTTP.EFI BOOTLOONGARCH64-HTTP.EFI
       - rm -f BOOTX64-HTTPS.EFI BOOTAA64-HTTPS.EFI BOOTRISCV64-HTTPS.EFI BOOTLOONGARCH64-HTTPS.EFI
+      - rm -f BOOTX64-OCI.EFI BOOTAA64-OCI.EFI BOOTRISCV64-OCI.EFI BOOTLOONGARCH64-OCI.EFI

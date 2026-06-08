@@ -27,7 +27,7 @@
 // own root). Mozilla's repository is the de-facto reference set for
 // "what Internet servers will be signed by".
 //
-// The current list (7 roots):
+// The current list (8 roots):
 //
 //   - ISRG Root X1                        (Let's Encrypt RSA)
 //   - ISRG Root X2                        (Let's Encrypt ECC)
@@ -38,14 +38,20 @@
 //                                          Cloudflare CA chain used
 //                                          by example.com today)
 //   - SSL.com TLS RSA Root CA 2022        (SSL Corp, RSA)
+//   - USERTrust RSA Certification Authority
+//                                          (Sectigo root — chained by
+//                                          ghcr.io via Sectigo Public
+//                                          Server Authentication CA
+//                                          DV R36; required by M7)
 //
-// Coverage on the public Internet: these seven roots transitively
-// sign roughly 80% of all publicly-reachable HTTPS hosts (the four
+// Coverage on the public Internet: these eight roots transitively
+// sign roughly 90% of all publicly-reachable HTTPS hosts (the four
 // "big four" — Let's Encrypt, DigiCert, Google, SSL.com — plus the
 // legacy DigiCert Global Root CA still in service for older
-// intermediates). The M6 smoke target example.com is currently
-// fronted by Cloudflare and chains to SSL.com TLS ECC Root CA 2022;
-// the SSL.com root is what makes the M6 probe verify.
+// intermediates, plus USERTrust for the Sectigo chains GitHub uses).
+// The M6 smoke target example.com is currently fronted by Cloudflare
+// and chains to SSL.com TLS ECC Root CA 2022; the M7 smoke target
+// ghcr.io chains to USERTrust RSA via Sectigo intermediates.
 //
 // Updating the bundle: replace `ca_bundle.pem` with a fresh extract
 // (e.g. via `security find-certificate -a -p`) and re-run

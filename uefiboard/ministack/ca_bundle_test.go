@@ -54,6 +54,9 @@ func TestEmbeddedRootsCoverExpectedCAs(t *testing.T) {
 		"GTS Root R1",
 		"SSL.com TLS ECC Root CA 2022",
 		"SSL.com TLS RSA Root CA 2022",
+		// USERTrust RSA Certification Authority — Sectigo CA chain
+		// used by ghcr.io (the M7 smoke target).
+		"USERTrust RSA Certification Authority",
 	}
 	got := map[string]bool{}
 	rest := embeddedCABundlePEM
