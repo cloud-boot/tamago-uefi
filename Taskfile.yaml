@@ -723,7 +723,7 @@ tasks:
           --bootloader efi,variable-store={{.NVRAM}} \
           --device virtio-blk,path={{.ESP}},readonly \
           --device virtio-blk,path={{.SCRATCH}} \
-          --device virtio-net,nat,mac=auto \
+          --device virtio-net,nat \
           --device virtio-serial,logFilePath={{.LOG}} \
           --log-level debug 2>&1 | tee {{.LOG}}.stdout &
         VFKIT_PID=$!
