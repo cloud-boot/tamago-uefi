@@ -95,7 +95,11 @@ trap 'if [[ "${M3_LIVE_KEEPRUN:-0}" != "1" ]]; then rm -rf "$WORK"; else echo "[
 ESP="$WORK/esp.img"
 ESP_SIZE_MB=16
 dd if=/dev/zero of="$ESP" bs=1m count="$ESP_SIZE_MB" status=none
-mformat -i "$ESP" -F ::
+# NOTE: do NOT pass `-F` (force FAT32) — at 16 MiB the volume is too
+# small for a valid FAT32 layout, EDK2 refuses to mount it, and BDS
+# falls back to PXE. Same bug we fixed in cloud-boot/iso/iso_multi.go
+# earlier. Let mformat pick FAT12/16 automatically.
+mformat -i "$ESP" ::
 mmd -i "$ESP" ::/EFI ::/EFI/BOOT
 mcopy -i "$ESP" "$EFI_PATH" "::/EFI/BOOT/$EFI_BOOT_NAME"
 
