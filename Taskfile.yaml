@@ -721,7 +721,13 @@ tasks:
           --device virtio-blk,path={{.SCRATCH}} \
           --device virtio-net,nat,mac=auto \
           --device virtio-serial,logFilePath={{.LOG}} \
-          --log-level debug --timeout {{.TIMEOUT}} 2>&1 | tee {{.LOG}}.stdout || echo "(vfkit timeout/exit $?)"
+          --log-level debug 2>&1 | tee {{.LOG}}.stdout &
+        VFKIT_PID=$!
+        ( sleep {{.TIMEOUT}}; kill -TERM $VFKIT_PID 2>/dev/null || true; sleep 2; kill -KILL $VFKIT_PID 2>/dev/null || true ) &
+        WATCHDOG_PID=$!
+        wait $VFKIT_PID 2>/dev/null || true
+        kill $WATCHDOG_PID 2>/dev/null || true
+        echo "(vfkit exit; watchdog timeout was {{.TIMEOUT}}s)"
       - |
         if [ -n "{{.SUDO_CAPTURE}}" ] && [ -s /tmp/m2b-tcpdump.pid ]; then
           sleep 1
@@ -732,7 +738,7 @@ tasks:
           sudo tcpdump -nn -r {{.PCAP}} arp 2>/dev/null | grep -E "169.254.2.66|169.254.99.99" || echo "no M2B! marker ARP found"
         fi
       - 'echo "--- recovered blkprintk pre-EBS scratch ({{.SCRATCH}}) ---"'
-      - 'cd "{{.TASKFILE_DIR}}" && go run ./cmd/blkprintk-recover {{.SCRATCH}}'
+      - 'cd "{{.TASKFILE_DIR}}" && GOWORK=off go run ./cmd/blkprintk-recover {{.SCRATCH}}'
       - 'echo "--- M2-B verdict signals to look for ---"'
       - 'echo "  PASS = pre-EBS dump reaches \"ExitToBareMetal\" + ARP marker captured on bridge"'
       - 'echo "  PARTIAL = pre-EBS reaches end but no marker (sudo tcpdump skipped or device gated post-EBS)"'
