@@ -21,6 +21,7 @@ package uefiboard
 import (
 	"strings"
 	"testing"
+	"unsafe"
 )
 
 func TestLinuxEFIInitrdMediaGUID(t *testing.T) {
@@ -174,5 +175,217 @@ func TestEFIDevicePathNode_Layout(t *testing.T) {
 	n := EFIDevicePathNode{Type: 0x04, SubType: 0x03, Length: 0x18}
 	if n.Type != 0x04 || n.SubType != 0x03 || n.Length != 0x18 {
 		t.Errorf("EFIDevicePathNode round-trip = %+v", n)
+	}
+}
+
+// --- loadFileGo: host-side tests of the two-call protocol --------
+//
+// The asm trampoline can't be exercised on host (no firmware to
+// invoke it), but loadFileGo itself is pure-Go-with-unsafe and is
+// the load-bearing semantic layer. We test it directly with
+// crafted pointers.
+
+// resetLoadFileRegistry zeroes the package-private array between
+// subtests so the linear scan returns deterministic results.
+func resetLoadFileRegistry(t *testing.T) {
+	t.Helper()
+	for i := range loadFileRegistry {
+		loadFileRegistry[i] = loadFileEntry{}
+	}
+}
+
+// registerInitrd installs a synthetic entry into slot 0 of the
+// registry, returning the synthetic `this` pointer the trampoline
+// would normally pass loadFileGo.
+func registerInitrd(t *testing.T, body []byte) (this uintptr) {
+	t.Helper()
+	// `this` is opaque to loadFileGo — it just needs a unique
+	// non-zero value the matching loadFileEntry carries. We use the
+	// address of a stack-allocated marker, which is stable for the
+	// life of this test function.
+	marker := byte(0)
+	this = uintptr(unsafe.Pointer(&marker))
+	loadFileRegistry[0] = loadFileEntry{
+		proto: this,
+		body:  uintptr(unsafe.Pointer(&body[0])),
+		size:  uintptr(len(body)),
+	}
+	return this
+}
+
+func TestLoadFileGo_BootPolicyTrue_Unsupported(t *testing.T) {
+	resetLoadFileRegistry(t)
+	body := []byte("initrd-bytes-for-bootpolicy-test")
+	this := registerInitrd(t, body)
+	var sz uintptr = uintptr(len(body))
+	got := loadFileGo(this, 0, 1, // bp != 0
+		uintptr(unsafe.Pointer(&sz)),
+		uintptr(unsafe.Pointer(&body[0])))
+	if got != loadFileEFIUnsupported {
+		t.Errorf("loadFileGo bp=1 -> 0x%x, want EFI_UNSUPPORTED (0x%x)", got, loadFileEFIUnsupported)
+	}
+}
+
+func TestLoadFileGo_UnknownHandle_NotFound(t *testing.T) {
+	resetLoadFileRegistry(t)
+	// No entry registered.
+	var sz uintptr = 0
+	got := loadFileGo(0xDEADBEEF, 0, 0,
+		uintptr(unsafe.Pointer(&sz)),
+		0)
+	if got != loadFileEFINotFound {
+		t.Errorf("loadFileGo unknown this -> 0x%x, want EFI_NOT_FOUND (0x%x)", got, loadFileEFINotFound)
+	}
+}
+
+func TestLoadFileGo_BufTooSmall_BufferTooSmall(t *testing.T) {
+	resetLoadFileRegistry(t)
+	body := []byte("the-quick-brown-fox-jumps-over-the-lazy-initrd")
+	this := registerInitrd(t, body)
+	// Buffer-too-small path #1: bufP non-NULL but capacity less than need.
+	var sz uintptr = uintptr(len(body) - 5)
+	dst := make([]byte, len(body))
+	got := loadFileGo(this, 0, 0,
+		uintptr(unsafe.Pointer(&sz)),
+		uintptr(unsafe.Pointer(&dst[0])))
+	if got != loadFileEFIBufferTooSmall {
+		t.Errorf("loadFileGo small-buf -> 0x%x, want EFI_BUFFER_TOO_SMALL (0x%x)", got, loadFileEFIBufferTooSmall)
+	}
+	if sz != uintptr(len(body)) {
+		t.Errorf("after small-buf call, *sz = %d, want %d", sz, len(body))
+	}
+	// Buffer-too-small path #2: bufP == NULL (the EFI-stub's
+	// size-query call).
+	sz = 0
+	got = loadFileGo(this, 0, 0,
+		uintptr(unsafe.Pointer(&sz)),
+		0)
+	if got != loadFileEFIBufferTooSmall {
+		t.Errorf("loadFileGo NULL-buf -> 0x%x, want EFI_BUFFER_TOO_SMALL", got)
+	}
+	if sz != uintptr(len(body)) {
+		t.Errorf("after NULL-buf call, *sz = %d, want %d", sz, len(body))
+	}
+}
+
+func TestLoadFileGo_BufBigEnough_Success(t *testing.T) {
+	resetLoadFileRegistry(t)
+	body := []byte("hello\x00world\xffinitrd-payload-bytes!")
+	this := registerInitrd(t, body)
+	var sz uintptr = uintptr(len(body))
+	dst := make([]byte, len(body))
+	got := loadFileGo(this, 0, 0,
+		uintptr(unsafe.Pointer(&sz)),
+		uintptr(unsafe.Pointer(&dst[0])))
+	if got != loadFileEFISuccess {
+		t.Errorf("loadFileGo big-buf -> 0x%x, want EFI_SUCCESS", got)
+	}
+	if sz != uintptr(len(body)) {
+		t.Errorf("after success call, *sz = %d, want %d", sz, len(body))
+	}
+	for i := range body {
+		if dst[i] != body[i] {
+			t.Errorf("dst[%d] = 0x%02x, want 0x%02x", i, dst[i], body[i])
+			break
+		}
+	}
+}
+
+func TestLoadFileGo_BufBigger_Success_PartialFill(t *testing.T) {
+	// Caller may pass a buffer LARGER than the initrd. We copy
+	// only `need` bytes and report `need` bytes via *sz; tail of
+	// dst is untouched.
+	resetLoadFileRegistry(t)
+	body := []byte("short-initrd")
+	this := registerInitrd(t, body)
+	var sz uintptr = 4096 // big
+	dst := make([]byte, 4096)
+	// Pre-fill dst tail so we can assert it's untouched.
+	for i := range dst {
+		dst[i] = 0xAA
+	}
+	got := loadFileGo(this, 0, 0,
+		uintptr(unsafe.Pointer(&sz)),
+		uintptr(unsafe.Pointer(&dst[0])))
+	if got != loadFileEFISuccess {
+		t.Errorf("loadFileGo over-sized-buf -> 0x%x, want EFI_SUCCESS", got)
+	}
+	if sz != uintptr(len(body)) {
+		t.Errorf("after over-sized success, *sz = %d, want %d", sz, len(body))
+	}
+	for i := range body {
+		if dst[i] != body[i] {
+			t.Errorf("dst[%d] = 0x%02x, want 0x%02x", i, dst[i], body[i])
+		}
+	}
+	// Tail must be untouched.
+	for i := len(body); i < len(dst); i++ {
+		if dst[i] != 0xAA {
+			t.Errorf("dst[%d] = 0x%02x, want untouched 0xAA", i, dst[i])
+			break
+		}
+	}
+}
+
+func TestLoadFileGo_NilSizeP_InvalidParameter(t *testing.T) {
+	resetLoadFileRegistry(t)
+	body := []byte("any")
+	this := registerInitrd(t, body)
+	// sizeP == 0 is a caller bug — surface it.
+	got := loadFileGo(this, 0, 0, 0, 0)
+	if got != loadFileEFIInvalidParameter {
+		t.Errorf("loadFileGo nil sizeP -> 0x%x, want EFI_INVALID_PARAMETER", got)
+	}
+}
+
+func TestLoadFileGo_MultipleSlots(t *testing.T) {
+	resetLoadFileRegistry(t)
+	bodyA := []byte("initrd-AAA")
+	bodyB := []byte("initrd-BBBBB")
+	markerA := byte(0)
+	markerB := byte(0)
+	thisA := uintptr(unsafe.Pointer(&markerA))
+	thisB := uintptr(unsafe.Pointer(&markerB))
+	loadFileRegistry[0] = loadFileEntry{
+		proto: thisA,
+		body:  uintptr(unsafe.Pointer(&bodyA[0])),
+		size:  uintptr(len(bodyA)),
+	}
+	loadFileRegistry[3] = loadFileEntry{
+		proto: thisB,
+		body:  uintptr(unsafe.Pointer(&bodyB[0])),
+		size:  uintptr(len(bodyB)),
+	}
+	// Resolve A.
+	dstA := make([]byte, len(bodyA))
+	szA := uintptr(len(bodyA))
+	if got := loadFileGo(thisA, 0, 0,
+		uintptr(unsafe.Pointer(&szA)),
+		uintptr(unsafe.Pointer(&dstA[0]))); got != loadFileEFISuccess {
+		t.Errorf("loadFileGo A -> 0x%x, want SUCCESS", got)
+	}
+	for i := range bodyA {
+		if dstA[i] != bodyA[i] {
+			t.Errorf("dstA[%d] = 0x%02x, want 0x%02x", i, dstA[i], bodyA[i])
+		}
+	}
+	// Resolve B.
+	dstB := make([]byte, len(bodyB))
+	szB := uintptr(len(bodyB))
+	if got := loadFileGo(thisB, 0, 0,
+		uintptr(unsafe.Pointer(&szB)),
+		uintptr(unsafe.Pointer(&dstB[0]))); got != loadFileEFISuccess {
+		t.Errorf("loadFileGo B -> 0x%x, want SUCCESS", got)
+	}
+	for i := range bodyB {
+		if dstB[i] != bodyB[i] {
+			t.Errorf("dstB[%d] = 0x%02x, want 0x%02x", i, dstB[i], bodyB[i])
+		}
+	}
+}
+
+func TestErrLoadFileRegistryFull_Message(t *testing.T) {
+	if !strings.Contains(ErrLoadFileRegistryFull.Error(), "registry") {
+		t.Errorf("ErrLoadFileRegistryFull = %q, expected 'registry'", ErrLoadFileRegistryFull.Error())
 	}
 }

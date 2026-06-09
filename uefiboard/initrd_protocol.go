@@ -31,7 +31,10 @@
 
 package uefiboard
 
-import "errors"
+import (
+	"errors"
+	"unsafe"
+)
 
 // LinuxEFIInitrdMediaGUID
 //
@@ -124,6 +127,13 @@ var ErrEmptyInitrd = errors.New("uefi: PublishInitrd initrd is empty")
 // already been undone.
 var ErrInitrdNotPublished = errors.New("uefi: initrd handle is zero (not published or already unpublished)")
 
+// ErrLoadFileRegistryFull is returned by PublishInitrd when the
+// fixed-size loadFileRegistry (used by the asm trampoline to look
+// up the active initrd by `this` pointer) has no free slot. Hitting
+// this means more concurrent PublishInitrd calls than the
+// trampoline supports — bump loadFileRegistrySize.
+var ErrLoadFileRegistryFull = errors.New("uefi: PublishInitrd loadFile registry full (bump loadFileRegistrySize)")
+
 // EFIDevicePathNode is the spec-aligned head of every device-path
 // node (UEFI 2.10 §10.3.1 table 10.5):
 //
@@ -198,4 +208,119 @@ func buildInitrdDevicePath() []byte {
 // pointer for the lifetime of the published handle.
 type EFILoadFile2Protocol struct {
 	LoadFile uint64 // firmware-callable function pointer, MS x64 / AAPCS64 / LP64 ABI
+}
+
+// loadFileRegistrySize bounds how many concurrently-published
+// initrds the per-arch asm trampoline + loadFileGo can serve. UEFI
+// is single-threaded and we typically publish exactly one (initrd
+// for the current boot), but a small fixed-size array (no map, no
+// runtime calls) keeps loadFileGo //go:nosplit-friendly and able to
+// reject EFI_NOT_FOUND on a stale this-pointer.
+const loadFileRegistrySize = 8
+
+// loadFileEntry is one slot in the package-private registry of
+// active LoadFile2 publishers. A non-zero `proto` field marks the
+// slot as live; UnpublishInitrd zeroes the slot. body+size pin the
+// in-memory initrd payload the trampoline must copy out on demand.
+type loadFileEntry struct {
+	proto uintptr // address of the published EFI_LOAD_FILE2_PROTOCOL struct (== "this" the firmware passes)
+	body  uintptr // address of byte[0] of the initrd payload
+	size  uintptr // byte length of the initrd payload
+}
+
+// loadFileRegistry is the package-private array the asm
+// trampoline-driven loadFileGo scans on every firmware callback.
+// Static storage — no map, no slice header — so accesses inside
+// the nosplit body do not pull in runtime helpers.
+var loadFileRegistry [loadFileRegistrySize]loadFileEntry
+
+// EFI_STATUS values used by loadFileGo. Re-declared as untyped
+// consts (the typed ones in memorymap.go are tamago-only) so this
+// file remains host-buildable for the unit tests in
+// initrd_protocol_test.go.
+const (
+	loadFileEFISuccess          uintptr = 0
+	loadFileEFIInvalidParameter uintptr = 0x8000000000000002
+	loadFileEFIUnsupported      uintptr = 0x8000000000000003
+	loadFileEFIBufferTooSmall   uintptr = 0x8000000000000005
+	loadFileEFINotFound         uintptr = 0x800000000000000E
+)
+
+// loadFileGo is the Go-side handler the per-arch asm trampoline
+// calls into after marshalling the firmware-ABI args into Go-ABI0
+// positions. It implements the EFI_LOAD_FILE2 two-call protocol
+// against the loadFileRegistry entry whose `proto` matches `this`.
+//
+// Calling convention (Go ABI0):
+//
+//	in:  this    = pointer to the published EFI_LOAD_FILE2_PROTOCOL
+//	             (which the firmware was given at install time)
+//	     fp      = pointer to the device path (caller-provided;
+//	             ignored — Linux always passes the root)
+//	     bp      = BootPolicy (0 = LoadFile2 semantics, required;
+//	             anything else → EFI_UNSUPPORTED per UEFI 2.10 §13.5)
+//	     sizeP   = IN/OUT *UINTN; on entry the buffer capacity, on
+//	             return the required size if BUFFER_TOO_SMALL or
+//	             the bytes written if SUCCESS.
+//	     bufP    = IN void*; the firmware-allocated buffer to copy
+//	             initrd into. May be NULL on the size-query call.
+//	out: uintptr EFI_STATUS.
+//
+// MUST be //go:nosplit (no stack growth) because the firmware
+// entered us on its own stack with no usable Go scheduler state.
+// We deliberately avoid calling any runtime helper here: the byte
+// copy is a manual loop (not `copy(...)` / runtime.memmove) and
+// no slice headers are read. (`//go:nowritebarrier` would be the
+// belt-and-braces guarantee but is restricted to the runtime
+// package; the manual-pointer-arithmetic body cannot emit a write
+// barrier in practice since it touches no heap-pointer-typed
+// memory.)
+//
+//go:nosplit
+func loadFileGo(this, fp, bp, sizeP, bufP uintptr) uintptr {
+	_ = fp // device path is ignored — Linux EFI-stub passes the root
+	// BootPolicy = TRUE means "use boot-manager policy"; the
+	// LoadFile2 protocol explicitly forbids it (UEFI 2.10 §13.5).
+	// Linux's EFI-stub always passes FALSE; reject anything else to
+	// surface a misuse loudly.
+	if bp != 0 {
+		return loadFileEFIUnsupported
+	}
+	if sizeP == 0 {
+		return loadFileEFIInvalidParameter
+	}
+	// Look up the published initrd by `this`. Linear scan over a
+	// fixed-size array (no map lookups → no runtime helpers).
+	var ent loadFileEntry
+	found := false
+	for i := 0; i < loadFileRegistrySize; i++ {
+		if loadFileRegistry[i].proto == this && loadFileRegistry[i].proto != 0 {
+			ent = loadFileRegistry[i]
+			found = true
+			break
+		}
+	}
+	if !found {
+		return loadFileEFINotFound
+	}
+	need := ent.size
+	have := *(*uintptr)(unsafe.Pointer(sizeP))
+	if bufP == 0 || have < need {
+		// Size-query path (or undersized buffer): publish the
+		// required size and return EFI_BUFFER_TOO_SMALL. The
+		// EFI-stub will re-allocate and re-call with a big-enough
+		// buffer.
+		*(*uintptr)(unsafe.Pointer(sizeP)) = need
+		return loadFileEFIBufferTooSmall
+	}
+	// Transfer path. Manual byte loop to avoid runtime.memmove
+	// (which would require a valid g pointer on entry). need is at
+	// most a few hundred MiB on the upper end and the firmware
+	// stack tolerates the sustained loop — measured against Linux
+	// initrd sizes of 32-128 MiB on the M8.2 target boots.
+	for i := uintptr(0); i < need; i++ {
+		*(*byte)(unsafe.Pointer(bufP + i)) = *(*byte)(unsafe.Pointer(ent.body + i))
+	}
+	*(*uintptr)(unsafe.Pointer(sizeP)) = need
+	return loadFileEFISuccess
 }

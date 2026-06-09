@@ -141,7 +141,9 @@ var ErrNoBootServices = errors.New("uefi: BootServices not available (cpuinit di
 const (
 	efiSuccess          uint64 = 0
 	efiInvalidParameter uint64 = 0x8000000000000002
+	efiUnsupported      uint64 = 0x8000000000000003
 	efiBufferTooSmall   uint64 = 0x8000000000000005
+	efiNotFound         uint64 = 0x800000000000000E
 )
 
 // parseMemoryMap turns the raw firmware buffer + descriptor-size stride
