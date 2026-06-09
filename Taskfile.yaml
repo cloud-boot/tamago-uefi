@@ -2159,6 +2159,80 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/livekernelboot/run.sh" loong64'
 
+  # =====================================================================
+  # VZ (Apple Virtualization.framework via vfkit) compatibility audit
+  # =====================================================================
+  #
+  # arm64-only — VZ is Apple-Silicon arm64-only. Each target boots the
+  # named arm64 EFI under vfkit. Detection is "VM did NOT stop early"
+  # because vfkit's EFI bootloader does not route firmware ConOut to
+  # virtio-serial (the log stays 0 bytes) and our probes spin in for{}
+  # instead of calling gBS->Exit. See internal/live_vz/run.sh header
+  # and cloud-boot/docs/vz-compatibility-audit.md for the full design.
+  #
+  # Network-dependent binaries (HTTP/HTTPS/OCI/COSIGN/MINISTACK/DHCP4)
+  # are intentionally NOT included — VZ gates virtio-net for non-OS
+  # clients (R-M2c CLOSED 2026-06-08).
+  vz:smoke:probe:
+    desc: 'VZ smoke for BOOTAA64-PROBE.EFI (M0 GetMemoryMap).'
+    deps: [probe:memory:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/live_vz/run.sh" probe'
+
+  vz:smoke:pcienum:
+    desc: 'VZ smoke for BOOTAA64-PCIENUM.EFI (M1 PCI walk).'
+    deps: [pcienum:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/live_vz/run.sh" pcienum'
+
+  vz:smoke:pcisnp:
+    desc: 'VZ smoke for BOOTAA64-PCISNP.EFI (M1.5 SNP walk).'
+    deps: [pcisnp:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/live_vz/run.sh" pcisnp'
+
+  vz:smoke:blkprint:
+    desc: 'VZ smoke for BOOTAA64-BLKPRINT.EFI (M1.6 Block-IO probe).'
+    deps: [blkprintk:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/live_vz/run.sh" blkprint'
+
+  vz:smoke:efihandover:
+    desc: 'VZ smoke for BOOTAA64-EFIHANDOVER.EFI (M8.0 chain-boot).'
+    deps: [efihandover:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/live_vz/run.sh" efihandover'
+
+  vz:smoke:kernelboot:
+    desc: 'VZ smoke for BOOTAA64-KERNELBOOT.EFI (M8.1 MODE B self-test).'
+    deps: [kernelboot:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/live_vz/run.sh" kernelboot'
+
+  vz:smoke:efipackstub:
+    desc: 'VZ smoke for BOOTAA64-EFIPACKSTUB.EFI (M6.2 PR2 bare stub — expected EARLY-EXIT, see audit doc).'
+    deps: [efistub:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/live_vz/run.sh" efipackstub || true'
+
+  vz:smoke:efipack_probe:
+    desc: 'VZ smoke for packed PROBE via pectl pack (M6.2 PR2 end-to-end).'
+    deps: [probe:memory:arm64, efistub:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/live_vz/run.sh" efipack_probe'
+
+  vz:smoke:arm64:
+    desc: 'Run the full VZ compatibility audit matrix (arm64-only, no network).'
+    cmds:
+      - task: vz:smoke:probe
+      - task: vz:smoke:pcienum
+      - task: vz:smoke:pcisnp
+      - task: vz:smoke:blkprint
+      - task: vz:smoke:efihandover
+      - task: vz:smoke:kernelboot
+      - task: vz:smoke:efipackstub
+      - task: vz:smoke:efipack_probe
+
 
   clean:
     desc: Remove built ELFs and EFIs.
