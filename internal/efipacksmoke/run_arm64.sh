@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M6.2 PR2 arm64 efipack smoke matrix.
 #
-# For each of {HTTP, HTTPS}:
+# For each of {HTTP, HTTPS, OCI, EFIHANDOVER}:
 #   1. Pack BOOTAA64-<NAME>.EFI via go-coff/efipack (compress/flate).
 #   2. Boot the packed PE under qemu-system-aarch64 + EDK2
 #      (mach-virt, OVMF aarch64) with the same device set the per-
@@ -14,8 +14,8 @@
 #     bash internal/efipacksmoke/run_arm64.sh
 #
 # Env overrides:
-#     EFIPACK_TIMEOUT          per-row wall-clock cap in seconds (default 90)
-#     EFIPACK_ROWS             space-separated row names (default: HTTP HTTPS)
+#     EFIPACK_TIMEOUT          per-row wall-clock cap in seconds (default 120)
+#     EFIPACK_ROWS             space-separated row names (default: HTTP HTTPS OCI EFIHANDOVER)
 #     EFIPACK_DIR              repo path to go-coff/efipack
 #                              (default: ../../../go-coff/efipack)
 #     CLOUDBOOT_OVMF_ARM64_CODE as in livehttp/run.sh
@@ -24,7 +24,7 @@ set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EFIPACK_DIR="${EFIPACK_DIR:-$REPO_DIR/../../go-coff/efipack}"
-TIMEOUT="${EFIPACK_TIMEOUT:-90}"
+TIMEOUT="${EFIPACK_TIMEOUT:-120}"
 
 FW_CODE_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-aarch64-code.fd"
 FW_CODE="${CLOUDBOOT_OVMF_ARM64_CODE:-$FW_CODE_DEFAULT}"
@@ -36,6 +36,8 @@ FW_CODE="${CLOUDBOOT_OVMF_ARM64_CODE:-$FW_CODE_DEFAULT}"
 ROWS=(
     "HTTP|BOOTAA64-HTTP.EFI|HTTP-GET OK"
     "HTTPS|BOOTAA64-HTTPS.EFI|HTTPS-GET OK"
+    "OCI|BOOTAA64-OCI.EFI|OCI-FETCH OK"
+    "EFIHANDOVER|BOOTAA64-EFIHANDOVER.EFI|phase2-efi-handover: StartImage entering child"
 )
 if [[ -n "${EFIPACK_ROWS:-}" ]]; then
     FILTERED=()
