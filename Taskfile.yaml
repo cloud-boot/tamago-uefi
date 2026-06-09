@@ -1891,6 +1891,70 @@ tasks:
     cmds:
       - go test -count=1 -v ./uefiboard/...
 
+  # M6.2 PR2 efipack stub builds (amd64 first; arm64/riscv64/loong64
+  # follow in the next sprint).
+  efistub:elf:amd64:
+    desc: 'Build app_amd64_efipackstub.elf (TamaGo PIE, M6.2 PR2 stub).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_efipackstub.elf ./cmd/efipackstub'
+
+  efistub:amd64:
+    desc: 'Link BOOTX64-EFIPACKSTUB.EFI and stage as efipack/stub/blobs/amd64.efi.bin.'
+    deps: [efistub:elf:amd64]
+    vars:
+      EFIPACK_DIR:
+        sh: |
+          if [ -n "$EFIPACK_DIR" ]; then echo "$EFIPACK_DIR";
+          else echo "{{.TASKFILE_DIR}}/../../go-coff/efipack"; fi
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-EFIPACKSTUB.EFI" "{{.TASKFILE_DIR}}/app_amd64_efipackstub.elf"'
+      - 'mkdir -p "{{.EFIPACK_DIR}}/stub/blobs"'
+      - 'cp "{{.TASKFILE_DIR}}/BOOTX64-EFIPACKSTUB.EFI" "{{.EFIPACK_DIR}}/stub/blobs/amd64.efi.bin"'
+
+  efipack:smoke:amd64:
+    desc: 'M6.2 PR2 amd64 smoke matrix (original vs packed for HTTP/HTTPS/OCI/EFIHANDOVER).'
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/efipacksmoke/run.sh"'
+
+  # M6.2 PR2 arm64 efipack stub (green; amd64 deferred -- see WIP
+  # branch m6-2-pr2-amd64-wip for the in-progress amd64 path).
+  efistub:elf:arm64:
+    desc: 'Build app_arm64_efipackstub.elf (TamaGo PIE, M6.2 PR2 stub).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_efipackstub.elf ./cmd/efipackstub'
+
+  efistub:arm64:
+    desc: 'Link BOOTAA64-EFIPACKSTUB.EFI and stage as efipack/stub/blobs/arm64.efi.bin.'
+    deps: [efistub:elf:arm64]
+    vars:
+      EFIPACK_DIR:
+        sh: |
+          if [ -n "$EFIPACK_DIR" ]; then echo "$EFIPACK_DIR";
+          else echo "{{.TASKFILE_DIR}}/../../go-coff/efipack"; fi
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-EFIPACKSTUB.EFI" "{{.TASKFILE_DIR}}/app_arm64_efipackstub.elf"'
+      - 'mkdir -p "{{.EFIPACK_DIR}}/stub/blobs"'
+      - 'cp "{{.TASKFILE_DIR}}/BOOTAA64-EFIPACKSTUB.EFI" "{{.EFIPACK_DIR}}/stub/blobs/arm64.efi.bin"'
+
+  efipack:smoke:arm64:
+    desc: 'M6.2 PR2 arm64 smoke matrix (original vs packed for HTTP/HTTPS).'
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/efipacksmoke/run_arm64.sh"'
+
   clean:
     desc: Remove built ELFs and EFIs.
     cmds:
@@ -1927,4 +1991,5 @@ tasks:
       - rm -f internal/embed_chained/chained_amd64.efi internal/embed_chained/chained_arm64.efi internal/embed_chained/chained_riscv64.efi internal/embed_chained/chained_loong64.efi
       - rm -f app_amd64_chainedtinyA.elf app_amd64_chainedtinyB.elf app_amd64_chainedtinyC.elf app_amd64_efitiny.elf
       - rm -f BOOTX64-CHAINEDTINYA.EFI BOOTX64-CHAINEDTINYB.EFI BOOTX64-CHAINEDTINYC.EFI BOOTX64-CHAINEDTINYZ.EFI BOOTX64-CHAINEDTINYZ64K.EFI BOOTX64-CHAINEDTINYZ1M.EFI BOOTX64-CHAINEDTINYZ2M.EFI BOOTX64-EFITINY.EFI
+      - rm -f app_amd64_efipackstub.elf BOOTX64-EFIPACKSTUB.EFI
       - rm -f internal/embed_chained_tiny/tiny_A_amd64.efi.gz internal/embed_chained_tiny/tiny_B_amd64.efi.gz internal/embed_chained_tiny/tiny_C_amd64.efi.gz internal/embed_chained_tiny/tiny_Z_amd64.efi.gz internal/embed_chained_tiny/tiny_Z64K_amd64.efi.gz internal/embed_chained_tiny/tiny_Z1M_amd64.efi.gz internal/embed_chained_tiny/tiny_Z2M_amd64.efi.gz
