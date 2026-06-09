@@ -117,6 +117,50 @@ func (s *Stack) HTTPSGet(rawurl string, opts HTTPGetOptions) (*HTTPResponse, err
 	return readHTTPSResponse(tlsConn)
 }
 
+// HTTPSGetStream is the HTTPS sibling of HTTPGetStream — same
+// semantics: status + body bytes written + content-type + error.
+// No response cap; the caller bounds `dst` if they want one.
+//
+// Honours Content-Length and Transfer-Encoding: chunked.
+func (s *Stack) HTTPSGetStream(rawurl string, dst io.Writer, opts HTTPGetOptions) (status int, written int64, contentType string, err error) {
+	status, written, headers, err := s.HTTPSGetStreamHeaders(rawurl, dst, opts)
+	return status, written, headers["content-type"], err
+}
+
+// HTTPSGetStreamHeaders is the extended variant: returns the full
+// parsed header map (lowercase keys). Used by FetchBlobStream to
+// follow Location redirects without a second round-trip.
+func (s *Stack) HTTPSGetStreamHeaders(rawurl string, dst io.Writer, opts HTTPGetOptions) (status int, written int64, headers map[string]string, err error) {
+	u, err := parseHTTPSURL(rawurl)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	dialTimeout := opts.DialTimeout
+	if dialTimeout <= 0 {
+		dialTimeout = defaultDialTimeout
+	}
+	tlsConn, err := s.DialTLS(u.Host, u.Port, opts.DNSServer, dialTimeout)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	defer tlsConn.Close()
+
+	reqTimeout := opts.RequestTimeout
+	if reqTimeout <= 0 {
+		reqTimeout = defaultRequestTimeout
+	}
+	if nc, ok := tlsConn.NetConn().(*TCP4Conn); ok {
+		_ = nc.SetDeadline(time.Now().Add(reqTimeout))
+	}
+
+	req := buildHTTPRequest(u, opts.ExtraHeaders)
+	if _, werr := tlsConn.Write(req); werr != nil {
+		return 0, 0, nil, werr
+	}
+	br := newLineReader(tlsConn)
+	return streamHTTPResponseHeaders(br, dst)
+}
+
 // readHTTPSResponse drains a *tls.Conn until EOF (peer FIN +
 // close-notify) or the response cap trips, then runs the response
 // through the M5 parser.

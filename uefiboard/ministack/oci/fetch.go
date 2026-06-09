@@ -27,7 +27,13 @@
 package oci
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
+	"strings"
+
+	"github.com/cloud-boot/tamago-uefi/uefiboard/ministack"
 )
 
 // Artifact is the in-RAM materialised view of one OCI image manifest:
@@ -159,4 +165,75 @@ func FetchArtifact(reg *Registry, opts FetchOptions) (*Artifact, error) {
 	}
 
 	return art, nil
+}
+
+// FetchBlobStream fetches a single blob descriptor through the
+// Registry's streaming transport and writes it to `dst`. The fetched
+// bytes are tee'd through a SHA-256 hasher while they flow; on EOF
+// the computed digest is checked against desc.Digest. On any mismatch
+// ErrDigestMismatch is returned (the caller is expected to discard
+// whatever made it into `dst`).
+//
+// Returns the number of bytes successfully written to `dst`.
+//
+// Unlike FetchBlob, this method does NOT cap the response size — the
+// caller bounds `dst` if they want a ceiling. This is what makes the
+// streaming path the unlock for multi-MiB kernel-sized blobs that
+// the buffered path's 1 MiB cap rejects.
+//
+// The Registry's Transport must implement StreamTransport. Following
+// redirects (3xx → Location) mirrors FetchBlob: up to maxBlobRedirects
+// hops, bearer dropped after the first hop so S3-style pre-signed
+// URLs don't get a conflicting Authorization header.
+func (reg *Registry) FetchBlobStream(desc Descriptor, dst io.Writer) (int64, error) {
+	if _, _, err := ParseDigest(desc.Digest); err != nil {
+		return 0, err
+	}
+	st, ok := reg.Transport.(StreamTransport)
+	if !ok {
+		return 0, ErrTransportNotStreaming
+	}
+
+	url := reg.Ref.blobURL(desc.Digest)
+	bearer := reg.bearer
+	for hop := 0; hop <= maxBlobRedirects; hop++ {
+		h := sha256.New()
+		mw := io.MultiWriter(dst, h)
+
+		opts := ministack.HTTPGetOptions{
+			DNSServer:      reg.DNS,
+			DialTimeout:    reg.DialTimeout,
+			RequestTimeout: reg.RequestTimeout,
+		}
+		if bearer != "" {
+			opts.ExtraHeaders = append(opts.ExtraHeaders, "Authorization: Bearer "+bearer)
+		}
+
+		status, n, headers, herr := st.GetStream(url, mw, opts)
+		if herr != nil {
+			return n, herr
+		}
+		if isRedirect(status) {
+			loc := headers["location"]
+			if loc == "" {
+				return 0, &ErrRegistryStatus{URL: url, Status: status}
+			}
+			url = loc
+			bearer = ""
+			continue
+		}
+		if status != 200 {
+			return n, &ErrRegistryStatus{URL: url, Status: status}
+		}
+		if desc.Size > 0 && n != desc.Size {
+			return n, fmt.Errorf("ministack/oci: blob size mismatch: got %d want %d", n, desc.Size)
+		}
+		_, wantHex, _ := ParseDigest(desc.Digest)
+		gotHex := hex.EncodeToString(h.Sum(nil))
+		if !strings.EqualFold(gotHex, wantHex) {
+			return n, ErrDigestMismatch
+		}
+		return n, nil
+	}
+	return 0, fmt.Errorf("ministack/oci: too many redirects (>%d) for %s", maxBlobRedirects, desc.Digest)
 }

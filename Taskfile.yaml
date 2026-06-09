@@ -1176,6 +1176,125 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/liveoci/run.sh" loong64'
 
+  # ----- M7.1a — streaming OCI blob fetch -------------------------
+  # Same pipeline as M7 oci: but with the `phase2_oci_stream_fetch`
+  # tag, which compiles in the streaming variant of the OCI fetch
+  # probe. The buffered M7 probe skips any layer over the 1 MiB
+  # HTTPMaxResponseBytes cap; the M7.1a streaming probe lifts that
+  # cap end-to-end (HTTPSGetStream + FetchBlobStream) and is what
+  # unlocks pulling kernel-sized blobs in M8.1.
+  # Outputs go to BOOT<ARCH>-OCISTREAM.EFI.
+  ocistream:elf:amd64:
+    desc: 'Build app_amd64_ocistream.elf (TamaGo PIE, M7.1a streaming OCI fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_stream_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_ocistream.elf .'
+
+  ocistream:elf:arm64:
+    desc: 'Build app_arm64_ocistream.elf (TamaGo PIE, M7.1a streaming OCI fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_stream_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_ocistream.elf .'
+
+  ocistream:elf:riscv64:
+    desc: 'Build app_riscv64_ocistream.elf (TamaGo PIE, M7.1a streaming OCI fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_stream_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_ocistream.elf .'
+
+  ocistream:elf:loong64:
+    desc: 'Build app_loong64_ocistream.elf (TamaGo PIE, M7.1a streaming OCI fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_stream_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_ocistream.elf .'
+
+  ocistream:efi:amd64:
+    desc: 'Build Phase-2 M7.1a BOOTX64-OCISTREAM.EFI (streaming OCI blob fetch probe).'
+    deps: [ocistream:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-OCISTREAM.EFI" "{{.TASKFILE_DIR}}/app_amd64_ocistream.elf"'
+
+  ocistream:efi:arm64:
+    desc: 'Build Phase-2 M7.1a BOOTAA64-OCISTREAM.EFI (streaming OCI blob fetch probe).'
+    deps: [ocistream:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-OCISTREAM.EFI" "{{.TASKFILE_DIR}}/app_arm64_ocistream.elf"'
+
+  ocistream:efi:riscv64:
+    desc: 'Build Phase-2 M7.1a BOOTRISCV64-OCISTREAM.EFI (streaming OCI blob fetch probe).'
+    deps: [ocistream:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-OCISTREAM.EFI" "{{.TASKFILE_DIR}}/app_riscv64_ocistream.elf"'
+
+  ocistream:efi:loong64:
+    desc: 'Build Phase-2 M7.1a BOOTLOONGARCH64-OCISTREAM.EFI (streaming OCI blob fetch probe).'
+    deps: [ocistream:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-OCISTREAM.EFI" "{{.TASKFILE_DIR}}/app_loong64_ocistream.elf"'
+
+  ocistream:all:
+    desc: 'Build all four Phase-2 M7.1a streaming OCI fetch probe EFIs.'
+    cmds:
+      - task: ocistream:efi:amd64
+      - task: ocistream:efi:arm64
+      - task: ocistream:efi:riscv64
+      - task: ocistream:efi:loong64
+
+  ocistream:test:
+    desc: 'Run host-side ministack + oci unit tests including the streaming path (M7.1a coverage gate >=90%).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -cover -v ./uefiboard/ministack/...
+
+  live:ocistream:amd64:
+    desc: 'Live streaming OCI fetch (M7.1a) — skipped: amd64 blocked by M6.2 (UPX-go).'
+    deps: [ocistream:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveocistream/run.sh" amd64'
+
+  live:ocistream:arm64:
+    desc: 'Live streaming OCI fetch (M7.1a) against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTAA64-OCISTREAM.EFI.'
+    deps: [ocistream:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveocistream/run.sh" arm64'
+
+  live:ocistream:riscv64:
+    desc: 'Live streaming OCI fetch (M7.1a) against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTRISCV64-OCISTREAM.EFI.'
+    deps: [ocistream:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveocistream/run.sh" riscv64'
+
+  live:ocistream:loong64:
+    desc: 'Live streaming OCI fetch (M7.1a) against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTLOONGARCH64-OCISTREAM.EFI.'
+    deps: [ocistream:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveocistream/run.sh" loong64'
+
   # ------------------------------------------------------------------
   # Phase 2 M8.0 — chain-boot mechanism. The parent EFI loads a
   # tiny chained EFI payload (cmd/chainedhello) embedded at build
@@ -1411,6 +1530,7 @@ tasks:
       - rm -f app_amd64_http.elf app_arm64_http.elf app_riscv64_http.elf app_loong64_http.elf
       - rm -f app_amd64_https.elf app_arm64_https.elf app_riscv64_https.elf app_loong64_https.elf
       - rm -f app_amd64_oci.elf app_arm64_oci.elf app_riscv64_oci.elf app_loong64_oci.elf
+      - rm -f app_amd64_ocistream.elf app_arm64_ocistream.elf app_riscv64_ocistream.elf app_loong64_ocistream.elf
       - rm -f app_amd64_chainedhello.elf app_arm64_chainedhello.elf app_riscv64_chainedhello.elf app_loong64_chainedhello.elf
       - rm -f app_amd64_efihandover.elf app_arm64_efihandover.elf app_riscv64_efihandover.elf app_loong64_efihandover.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
@@ -1424,6 +1544,7 @@ tasks:
       - rm -f BOOTX64-HTTP.EFI BOOTAA64-HTTP.EFI BOOTRISCV64-HTTP.EFI BOOTLOONGARCH64-HTTP.EFI
       - rm -f BOOTX64-HTTPS.EFI BOOTAA64-HTTPS.EFI BOOTRISCV64-HTTPS.EFI BOOTLOONGARCH64-HTTPS.EFI
       - rm -f BOOTX64-OCI.EFI BOOTAA64-OCI.EFI BOOTRISCV64-OCI.EFI BOOTLOONGARCH64-OCI.EFI
+      - rm -f BOOTX64-OCISTREAM.EFI BOOTAA64-OCISTREAM.EFI BOOTRISCV64-OCISTREAM.EFI BOOTLOONGARCH64-OCISTREAM.EFI
       - rm -f BOOTX64-CHAINED.EFI BOOTAA64-CHAINED.EFI BOOTRISCV64-CHAINED.EFI BOOTLOONGARCH64-CHAINED.EFI
       - rm -f BOOTX64-EFIHANDOVER.EFI BOOTAA64-EFIHANDOVER.EFI BOOTRISCV64-EFIHANDOVER.EFI BOOTLOONGARCH64-EFIHANDOVER.EFI
       - rm -f internal/embed_chained/chained_amd64.efi internal/embed_chained/chained_arm64.efi internal/embed_chained/chained_riscv64.efi internal/embed_chained/chained_loong64.efi

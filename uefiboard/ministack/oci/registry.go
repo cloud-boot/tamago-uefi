@@ -45,6 +45,7 @@ package oci
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"time"
@@ -109,6 +110,37 @@ func (t *stackTransport) Get(url string, opts ministack.HTTPGetOptions) (*minist
 	}
 	return t.stack.HTTPSGet(url, opts)
 }
+
+// GetStream is the streaming sibling of Get — used by FetchBlobStream
+// to pull arbitrary-size blobs without buffering them in RAM. Routes
+// through the ministack streaming HTTP/HTTPS API and returns the full
+// lowercase-keyed headers map (so the OCI layer can chase Location
+// redirects without a second round-trip).
+func (t *stackTransport) GetStream(url string, dst io.Writer, opts ministack.HTTPGetOptions) (status int, written int64, headers map[string]string, err error) {
+	if strings.HasPrefix(url, "http://") {
+		return t.stack.HTTPGetStreamHeaders(url, dst, opts)
+	}
+	return t.stack.HTTPSGetStreamHeaders(url, dst, opts)
+}
+
+// StreamTransport is the optional extension implemented by
+// transports that support streaming GETs. FetchBlobStream requires
+// the configured Transport to also satisfy StreamTransport — without
+// it the streaming path would have to fall back to a buffered Get,
+// which defeats the purpose (and would silently re-impose the 1 MiB
+// cap). We surface the type-assert failure as a clear error.
+//
+// GetStream returns the status, the number of body bytes written to
+// dst, a small headers map keyed lowercase (capturing at least
+// `location` for redirect chasing and `content-type` for the
+// buffered-mirror), and any transport error.
+type StreamTransport interface {
+	GetStream(url string, dst io.Writer, opts ministack.HTTPGetOptions) (status int, written int64, headers map[string]string, err error)
+}
+
+// ErrTransportNotStreaming is returned by FetchBlobStream when the
+// Registry's Transport doesn't satisfy StreamTransport.
+var ErrTransportNotStreaming = errors.New("ministack/oci: Transport does not support streaming (need StreamTransport)")
 
 // Registry binds a Transport + DHCP-learned DNS server to a parsed
 // Ref. The zero value is unusable; construct via NewRegistry.
