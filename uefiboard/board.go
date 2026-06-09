@@ -41,20 +41,23 @@ var (
 var heapBase uint64
 
 // RamStart placeholder. The real value is written by the per-arch cpuinit
-// shim (RamStart = &runtime.text - 64 KiB, so the runtime tracks wherever
-// firmware loaded the image). Declared here unconditionally because
+// shim to the base address returned by gBS->AllocatePages — a guaranteed
+// RW, NX-free, RAM-backed page chunk that does not overlap firmware code,
+// data, or the loaded image. Declared here unconditionally because
 // neither framework/amd64 (when built with -tags linkramstart) nor
 // framework/arm64 (no mem.go at all) provides the symbol.
 //
 //go:linkname ramStart runtime/goos.RamStart
 var ramStart uint64
 
-// RamSize is per-arch (see board_<arch>.go): firmware on amd64 typically
-// loads the image in low RAM with plenty of room above, so 704 MiB works
-// with QEMU -m 2048; on aarch64-virt firmware places the image near the
-// top of installed RAM, leaving only a thin sliver above — a smaller
-// bound is required there. A later milestone reconciles RamSize against
-// the UEFI memory map post-World, as go-boot's amd64 path does.
+// RamSize is per-arch (see board_<arch>.go): all four arches use the
+// gBS->AllocatePages flow, passing (RamSize >> 12) as the page count.
+// 128 MiB across the board (R-amd64b 2026-06-09; previously amd64 used
+// 704 MiB anchored at `&runtime.text - 64 KiB`, which overflowed past
+// the QEMU q35 `0x80000000` PCI MMIO hole and into firmware-protected
+// regions under the patched OVMF — see cpuinit_amd64.s for the full
+// history). A later milestone reconciles RamSize against the UEFI
+// memory map post-World, as go-boot's amd64 path does.
 
 // EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL.OutputString lives at offset 0x08 on
 // every UEFI revision/arch.
