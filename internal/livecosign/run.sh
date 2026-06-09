@@ -21,14 +21,28 @@
 # Builds a tiny FAT ESP-disk containing the per-arch BOOT*-COSIGN.EFI
 # under \EFI\BOOT\, runs the matching qemu-system-<arch> with EDK2
 # firmware + virtio-net-pci on `-netdev user`, captures stdout for up
-# to 120 s, and matches on:
-#   1. "pubkey parsed - curve P-256 OK"   — PEM/PKIX/ECDSA wiring OK.
-#   2. "happy path Verify OK"             — happy ECDSA verify path.
-#   3. "tampered Verify rejected"         — fail-closed on bad sig.
-#   4. "lease acquired"                   — DHCPv4 DORA completed.
-#   5. "embedded roots ="                 — CA bundle parsed.
-#   6. "COSIGN OK"                        — full M7.1b path OK.
-# Exit 0 on PASS (all six matched), 1 otherwise.
+# to 120 s, and matches on the per-mode anchor lines:
+#
+#   MODE = self-test (default committed build):
+#     1. "pubkey parsed - curve P-256 OK"  — PEM/PKIX/ECDSA wiring OK.
+#     2. "happy path Verify OK"            — happy ECDSA verify path.
+#     3. "tampered Verify rejected"        — fail-closed on bad sig.
+#     4. "lease acquired"                  — DHCPv4 DORA completed.
+#     5. "embedded roots ="                — CA bundle parsed.
+#     6. "COSIGN OK"                       — full M7.1b path OK.
+#
+#   MODE = real-image (when the cosignTargetRef/cosignEmbeddedPubKey
+#   constants in phase2_oci_cosign_verify.go are populated — see
+#   internal/livecosign/run-real-image.sh):
+#     1. "MODE = real-image"               — real-image branch taken.
+#     2. "lease acquired"                  — DHCPv4 DORA completed.
+#     3. "embedded roots ="                — CA bundle parsed.
+#     4. "manifest digest = sha256:..."    — index/manifest walk OK.
+#     5. "COSIGN OK"                       — ECDSA verify against the
+#                                            embedded pubkey passed.
+#
+# Mode is auto-detected from the "MODE = ..." log line. Exit 0 on
+# PASS, 1 otherwise.
 #
 # Boot-media plumbing mirrors `liveocistream/run.sh` 1:1.
 #
@@ -175,17 +189,36 @@ kill "$KILLER_PID" 2>/dev/null || true
 END_NS="$(date +%s%N)"
 ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
 
-if grep -q "pubkey parsed - curve P-256 OK" "$LOG" \
-   && grep -q "happy path Verify OK" "$LOG" \
-   && grep -q "tampered Verify rejected" "$LOG" \
-   && grep -q "lease acquired" "$LOG" \
-   && grep -q "embedded roots =" "$LOG" \
-   && grep -q "COSIGN OK" "$LOG"; then
-    echo "[live-cosign:$ARCH] PASS — wall=${ELAPSED_MS}ms"
+# The probe runs in either MODE = self-test (default committed build:
+# no cosignTargetRef configured) or MODE = real-image (constants
+# populated; e.g. when run via internal/livecosign/run-real-image.sh).
+# Each mode emits different anchor lines; auto-detect from the log
+# and apply the matching gate.
+if grep -q "MODE = real-image" "$LOG"; then
+    MODE=real-image
+    GATE=("MODE = real-image" "lease acquired" "embedded roots =" "manifest digest =" "COSIGN OK")
+elif grep -q "MODE = self-test" "$LOG"; then
+    MODE=self-test
+    GATE=("pubkey parsed - curve P-256 OK" "happy path Verify OK" "tampered Verify rejected" "lease acquired" "embedded roots =" "COSIGN OK")
+else
+    echo "[live-cosign:$ARCH] FAIL — never saw 'MODE = ...' marker after ${ELAPSED_MS}ms (probe didn't reach runOCICosignVerifyProbe)" >&2
+    echo "[live-cosign:$ARCH] tail of qemu log (last 200 lines):" >&2
+    tail -200 "$LOG" >&2 || true
+    exit 1
+fi
+
+MISSING=()
+for line in "${GATE[@]}"; do
+    if ! grep -q "$line" "$LOG"; then
+        MISSING+=("$line")
+    fi
+done
+if [[ ${#MISSING[@]} -eq 0 ]]; then
+    echo "[live-cosign:$ARCH] PASS (mode=$MODE) — wall=${ELAPSED_MS}ms"
     grep -E "phase2-oci-cosign:" "$LOG" || true
     exit 0
 fi
-echo "[live-cosign:$ARCH] FAIL — missing one of 'pubkey parsed - curve P-256 OK' / 'happy path Verify OK' / 'tampered Verify rejected' / 'lease acquired' / 'embedded roots =' / 'COSIGN OK' after ${ELAPSED_MS}ms" >&2
+echo "[live-cosign:$ARCH] FAIL (mode=$MODE) — missing: ${MISSING[*]} after ${ELAPSED_MS}ms" >&2
 echo "[live-cosign:$ARCH] tail of qemu log (last 200 lines):" >&2
 tail -200 "$LOG" >&2 || true
 exit 1

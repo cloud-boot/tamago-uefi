@@ -15,7 +15,7 @@
 //     digest (`sha256:` + sha256(rawManifest)).
 //   - reg.FetchManifestRaw(`sha256-<hex>.sig`) → cosign sig artifact.
 //   - CosignVerifier.Verify(reg, ref, manifestDigest) → ECDSA verify
-//     each layer's `dev.sigstore.cosign/v1/signature` annotation
+//     each layer's `dev.cosignproject.cosign/signature` annotation
 //     against the canonical payload.
 //
 // MODE B — SELF-TEST (auto-fallback):
@@ -62,12 +62,27 @@ import (
 // manifest → fetches the .sig tag → ECDSA-verifies the signature
 // annotation against cosignEmbeddedPubKey.
 //
-// Leaving this empty is the current default because we don't yet ship
-// the matching pinned pubkey for a public cosign-signed image. The
-// canonical M7.1b candidate (`ghcr.io/sigstore/cosign/cosign:v2.4.0`)
-// is signed KEYLESSLY (Fulcio + Rekor), which is out of scope for
-// M7.1b. The self-test path proves the verifier end-to-end; wiring
-// against a real keyed-cosign image is queued as a follow-up.
+// The default for committed builds is EMPTY (= self-test) because no
+// durable public registry hosts a keyed-cosign-signed image with a
+// publicly-known static ECDSA P-256 pubkey:
+//
+//   - distroless (gcr.io/distroless/*) used to ship a static
+//     `cosign.pub` (still in their repo) but migrated to KEYLESS
+//     Fulcio+Rekor signatures; the documented static key no longer
+//     verifies any current image (we re-tested 2026-06-09).
+//   - Rancher's Application Collection key
+//     (https://apps.rancher.io/ap-pubkey.pem) is RSA-2048 — our
+//     verifier is keyed-only ECDSA-P256, so it's incompatible.
+//   - Kubernetes / cosign / sigstore are all keyless.
+//
+// For one-shot live verification we publish to `ttl.sh`
+// (anonymous, max-24h-TTL) under a fresh ECDSA P-256 keypair using
+// cosign v2 (legacy simple-signing format — cosign v3 switched to
+// `vnd.sigstore.bundle` which this verifier doesn't parse). See
+// `internal/livecosign/run-real-image.sh` to regenerate + run.
+//
+// To enable the real-image path: populate both constants below; the
+// matching pubkey must be PEM-encoded ECDSA on the NIST P-256 curve.
 const cosignTargetRef = ""
 
 // cosignEmbeddedPubKey is the PEM-encoded ECDSA P-256 public key the

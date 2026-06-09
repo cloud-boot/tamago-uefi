@@ -17,7 +17,7 @@
 //   - The .sig artifact is itself an OCI manifest. Each signature is
 //     one layer; the ECDSA signature is carried on the layer
 //     descriptor as the annotation
-//     `dev.sigstore.cosign/v1/signature` (base64-encoded raw
+//     `dev.cosignproject.cosign/signature` (base64-encoded raw
 //     ECDSA(P-256, SHA-256) signature, ASN.1-DER encoded).
 //   - The signed payload is the canonical JSON
 //
@@ -50,8 +50,11 @@ import (
 )
 
 // Cosign annotation key carrying the base64-encoded ECDSA signature
-// on a .sig manifest layer descriptor.
-const CosignSignatureAnnotation = "dev.sigstore.cosign/v1/signature"
+// on a .sig manifest layer descriptor. Per the cosign SIGNATURE_SPEC
+// (https://github.com/sigstore/cosign/blob/main/specs/SIGNATURE_SPEC.md),
+// the canonical annotation is `dev.cosignproject.cosign/signature`
+// — this is what real cosign-keyed-signed images carry.
+const CosignSignatureAnnotation = "dev.cosignproject.cosign/signature"
 
 // CosignSimpleSigningMediaType is the layer media-type cosign assigns
 // to the simple-signing payload blob. We don't strictly require it
@@ -220,7 +223,7 @@ func parseSigManifest(raw []byte) (*sigManifest, error) {
 
 // Verify fetches the cosign .sig artifact for the supplied
 // manifestDigest, walks each layer, and ECDSA-verifies the
-// `dev.sigstore.cosign/v1/signature` annotation against the canonical
+// `dev.cosignproject.cosign/signature` annotation against the canonical
 // payload constructed from (reg.Ref.Repo + manifestDigest).
 //
 // Returns nil on first successful signature; an error describing the
