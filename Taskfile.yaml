@@ -2019,6 +2019,24 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/efipacksmoke/run_loong64.sh"'
 
+  # M6.2 PR3 consolidated smoke matrix. Runs the per-arch
+  # efipack:smoke:<arch> tasks in series for arm64 / riscv64 /
+  # loong64 — the three arches whose runtime-decompressor stubs are
+  # green at M6.2 close. amd64 is intentionally omitted: its stub
+  # lives on the m6-2-pr2-amd64-wip branch pending deeper Block-IO
+  # side-channel debug. Each per-arch task prints its own PASS/FAIL
+  # table; the wrapper additionally drops a Markdown summary at
+  # /tmp/efipack-smoke-matrix.md so the operator can paste it into
+  # the status report.
+  efipack:smoke:all:
+    desc: 'Run packed-binary smoke matrix across all M6.2-supported arches.'
+    cmds:
+      - task: efipack:smoke:arm64
+      - task: efipack:smoke:riscv64
+      - task: efipack:smoke:loong64
+      - 'bash "{{.TASKFILE_DIR}}/internal/efipacksmoke/summary.sh" > /tmp/efipack-smoke-matrix.md'
+      - 'echo "wrote /tmp/efipack-smoke-matrix.md"'
+
   clean:
     desc: Remove built ELFs and EFIs.
     cmds:
