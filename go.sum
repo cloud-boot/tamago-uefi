@@ -1,0 +1,4 @@
+github.com/go-virtio/common v0.1.0 h1:uH7oq+vkcVWgk4NV9qvpQYzL4oSsHj79nU4+/N0tvWY=
+github.com/go-virtio/common v0.1.0/go.mod h1:tllXVerGT1TquYzy5o1K5UyAWSd1Ap/Z68f9zzJKrLQ=
+github.com/go-virtio/net v0.1.0 h1:kLGRBwK/X3KJ5WV9f/2AksGnDuGtVBSnpzdgxSKuSIc=
+github.com/go-virtio/net v0.1.0/go.mod h1:fGTlgsrafoGqDZsQ4/Pv2IMWEhoPnJUEtoxIlRsTLBU=
