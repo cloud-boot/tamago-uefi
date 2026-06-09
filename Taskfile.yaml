@@ -2037,6 +2037,129 @@ tasks:
       - 'bash "{{.TASKFILE_DIR}}/internal/efipacksmoke/summary.sh" > /tmp/efipack-smoke-matrix.md'
       - 'echo "wrote /tmp/efipack-smoke-matrix.md"'
 
+  # Phase-2 M8.1-minimal probe — composes the M7.1a streaming OCI
+  # fetcher with the M8.0 LoadImage+StartImage chain-boot mechanism.
+  # Same shape as the efihandover:* targets (depends on
+  # chainedhello:efi:<arch> so //go:embed has its target file in
+  # place) but with the `phase2_oci_kernel_boot` tag instead of
+  # `phase2_efi_handover`.
+  #
+  # MODE B (default in this build): streams the embedded chained EFI
+  # bytes through an in-process oci.Transport, SHA-256-verifies via
+  # FetchBlobStream, then hands the bytes to LoadImage+StartImage.
+  # Proves the full OCI → LoadImage → StartImage pipeline without
+  # depending on a publicly-hosted OCI artifact.
+  #
+  # MODE A (kernelBootTargetRef populated in source): walks a real
+  # registry over virtio-net+DHCP+TLS, picks the per-arch manifest,
+  # streams the bootable layer, and chain-boots it. Currently dormant
+  # pending a write:packages PAT to publish BOOT*-CHAINED.EFI to
+  # ghcr.io.
+  #
+  # Live runner accepts a longer wall-clock cap (120s) than the M7.1a
+  # runner because LoadImage on a 1 MiB+ payload + StartImage entry
+  # adds non-trivial firmware-side work on top of the streaming leg.
+  # amd64 deferred (per the brief) to its own debug sprint behind the
+  # M6.1 OVMF >4 MiB threshold; live targets cover arm64/riscv64/loong64.
+  kernelboot:elf:amd64:
+    desc: 'Build app_amd64_kernelboot.elf (TamaGo PIE, M8.1-minimal probe).'
+    deps: [check-toolchain, chainedhello:efi:amd64]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_kernel_boot -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_kernelboot.elf .'
+
+  kernelboot:elf:arm64:
+    desc: 'Build app_arm64_kernelboot.elf (TamaGo PIE, M8.1-minimal probe).'
+    deps: [check-toolchain, chainedhello:efi:arm64]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_kernel_boot -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_kernelboot.elf .'
+
+  kernelboot:elf:riscv64:
+    desc: 'Build app_riscv64_kernelboot.elf (TamaGo PIE, M8.1-minimal probe).'
+    deps: [check-toolchain, chainedhello:efi:riscv64]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_kernel_boot -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_kernelboot.elf .'
+
+  kernelboot:elf:loong64:
+    desc: 'Build app_loong64_kernelboot.elf (TamaGo PIE, M8.1-minimal probe).'
+    deps: [check-toolchain, chainedhello:efi:loong64]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_kernel_boot -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_kernelboot.elf .'
+
+  kernelboot:efi:amd64:
+    desc: 'Build Phase-2 M8.1-minimal BOOTX64-KERNELBOOT.EFI (OCI streaming + LoadImage + StartImage).'
+    deps: [kernelboot:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-KERNELBOOT.EFI" "{{.TASKFILE_DIR}}/app_amd64_kernelboot.elf"'
+
+  kernelboot:efi:arm64:
+    desc: 'Build Phase-2 M8.1-minimal BOOTAA64-KERNELBOOT.EFI (OCI streaming + LoadImage + StartImage).'
+    deps: [kernelboot:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-KERNELBOOT.EFI" "{{.TASKFILE_DIR}}/app_arm64_kernelboot.elf"'
+
+  kernelboot:efi:riscv64:
+    desc: 'Build Phase-2 M8.1-minimal BOOTRISCV64-KERNELBOOT.EFI (OCI streaming + LoadImage + StartImage).'
+    deps: [kernelboot:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-KERNELBOOT.EFI" "{{.TASKFILE_DIR}}/app_riscv64_kernelboot.elf"'
+
+  kernelboot:efi:loong64:
+    desc: 'Build Phase-2 M8.1-minimal BOOTLOONGARCH64-KERNELBOOT.EFI (OCI streaming + LoadImage + StartImage).'
+    deps: [kernelboot:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-KERNELBOOT.EFI" "{{.TASKFILE_DIR}}/app_loong64_kernelboot.elf"'
+
+  kernelboot:all:
+    desc: 'Build all four Phase-2 M8.1-minimal kernelboot EFIs.'
+    cmds:
+      - task: kernelboot:efi:amd64
+      - task: kernelboot:efi:arm64
+      - task: kernelboot:efi:riscv64
+      - task: kernelboot:efi:loong64
+
+  kernelboot:live:arm64:
+    desc: 'Live M8.1-minimal smoke from BOOTAA64-KERNELBOOT.EFI under QEMU+EDK2.'
+    deps: [kernelboot:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livekernelboot/run.sh" arm64'
+
+  kernelboot:live:riscv64:
+    desc: 'Live M8.1-minimal smoke from BOOTRISCV64-KERNELBOOT.EFI under QEMU+EDK2.'
+    deps: [kernelboot:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livekernelboot/run.sh" riscv64'
+
+  kernelboot:live:loong64:
+    desc: 'Live M8.1-minimal smoke from BOOTLOONGARCH64-KERNELBOOT.EFI under QEMU+EDK2.'
+    deps: [kernelboot:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livekernelboot/run.sh" loong64'
+
+
   clean:
     desc: Remove built ELFs and EFIs.
     cmds:
@@ -2068,6 +2191,8 @@ tasks:
       - rm -f BOOTX64-HTTPS.EFI BOOTAA64-HTTPS.EFI BOOTRISCV64-HTTPS.EFI BOOTLOONGARCH64-HTTPS.EFI
       - rm -f BOOTX64-OCI.EFI BOOTAA64-OCI.EFI BOOTRISCV64-OCI.EFI BOOTLOONGARCH64-OCI.EFI
       - rm -f BOOTX64-OCISTREAM.EFI BOOTAA64-OCISTREAM.EFI BOOTRISCV64-OCISTREAM.EFI BOOTLOONGARCH64-OCISTREAM.EFI
+      - rm -f app_amd64_kernelboot.elf app_arm64_kernelboot.elf app_riscv64_kernelboot.elf app_loong64_kernelboot.elf
+      - rm -f BOOTX64-KERNELBOOT.EFI BOOTAA64-KERNELBOOT.EFI BOOTRISCV64-KERNELBOOT.EFI BOOTLOONGARCH64-KERNELBOOT.EFI
       - rm -f BOOTX64-CHAINED.EFI BOOTAA64-CHAINED.EFI BOOTRISCV64-CHAINED.EFI BOOTLOONGARCH64-CHAINED.EFI
       - rm -f BOOTX64-EFIHANDOVER.EFI BOOTAA64-EFIHANDOVER.EFI BOOTRISCV64-EFIHANDOVER.EFI BOOTLOONGARCH64-EFIHANDOVER.EFI
       - rm -f internal/embed_chained/chained_amd64.efi internal/embed_chained/chained_arm64.efi internal/embed_chained/chained_riscv64.efi internal/embed_chained/chained_loong64.efi
