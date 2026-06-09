@@ -1744,6 +1744,142 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/liveefihandover/run.sh" loong64'
 
+  # =====================================================================
+  # Phase-2 M6.2 de-risk experiment — chained LoadImage threshold sweep
+  # =====================================================================
+  #
+  # amd64-only. Builds four tiny chained variants (A/B/C are TamaGo PIE
+  # at the runtime floor ~1.7 MiB; Z is a hand-rolled 1 KiB PE32+),
+  # stages each gzipped into internal/embed_chained_tiny, then links a
+  # parent (BOOTX64-EFITINY.EFI) with the phase2_efi_tiny_handover tag.
+  # The parent iterates through every variant calling
+  # gBS->LoadImage+StartImage and prints PASS/FAIL per variant. The
+  # live runner inspects the QEMU+EDK2 log for the per-variant signals
+  # plus the CpuDxe.dll +0x110C #GP block.
+  #
+  # See cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §5 M6.1 / M6.2
+  # for the threshold table this produces.
+  chainedtinyA:elf:amd64:
+    desc: 'Build app_amd64_chainedtinyA.elf (TamaGo PIE, M6.2 tinyA payload).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_chainedtinyA.elf ./cmd/chainedtinyA'
+
+  chainedtinyB:elf:amd64:
+    desc: 'Build app_amd64_chainedtinyB.elf (TamaGo PIE, M6.2 tinyB payload).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_chainedtinyB.elf ./cmd/chainedtinyB'
+
+  chainedtinyC:elf:amd64:
+    desc: 'Build app_amd64_chainedtinyC.elf (TamaGo PIE, M6.2 tinyC payload).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_chainedtinyC.elf ./cmd/chainedtinyC'
+
+  chainedtinyA:efi:amd64:
+    desc: 'Link BOOTX64-CHAINEDTINYA.EFI and stage gzipped into embed_chained_tiny.'
+    deps: [chainedtinyA:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYA.EFI" "{{.TASKFILE_DIR}}/app_amd64_chainedtinyA.elf"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYA.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained_tiny/tiny_A_amd64.efi.gz"'
+
+  chainedtinyB:efi:amd64:
+    desc: 'Link BOOTX64-CHAINEDTINYB.EFI and stage gzipped into embed_chained_tiny.'
+    deps: [chainedtinyB:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYB.EFI" "{{.TASKFILE_DIR}}/app_amd64_chainedtinyB.elf"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYB.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained_tiny/tiny_B_amd64.efi.gz"'
+
+  chainedtinyC:efi:amd64:
+    desc: 'Link BOOTX64-CHAINEDTINYC.EFI and stage gzipped into embed_chained_tiny.'
+    deps: [chainedtinyC:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYC.EFI" "{{.TASKFILE_DIR}}/app_amd64_chainedtinyC.elf"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYC.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained_tiny/tiny_C_amd64.efi.gz"'
+
+  chainedtinyZ:efi:amd64:
+    desc: 'Generate hand-rolled minimal PE32+ BOOTX64-CHAINEDTINYZ.EFI (~1 KiB) and stage gzipped.'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - 'go run ./cmd/chainedtinyZgen -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYZ.EFI"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYZ.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained_tiny/tiny_Z_amd64.efi.gz"'
+
+  chainedtinyZ64K:efi:amd64:
+    desc: 'Generate padded hand-rolled PE32+ BOOTX64-CHAINEDTINYZ64K.EFI (64 KiB) and stage gzipped.'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - 'go run ./cmd/chainedtinyZgen -pad-to 65536 -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYZ64K.EFI"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYZ64K.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained_tiny/tiny_Z64K_amd64.efi.gz"'
+
+  chainedtinyZ1M:efi:amd64:
+    desc: 'Generate padded hand-rolled PE32+ BOOTX64-CHAINEDTINYZ1M.EFI (1 MiB) and stage gzipped.'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - 'go run ./cmd/chainedtinyZgen -pad-to 1048576 -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYZ1M.EFI"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYZ1M.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained_tiny/tiny_Z1M_amd64.efi.gz"'
+
+  chainedtinyZ2M:efi:amd64:
+    desc: 'Generate padded hand-rolled PE32+ BOOTX64-CHAINEDTINYZ2M.EFI (2 MiB) and stage gzipped.'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - 'go run ./cmd/chainedtinyZgen -pad-to 2097152 -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYZ2M.EFI"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTX64-CHAINEDTINYZ2M.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained_tiny/tiny_Z2M_amd64.efi.gz"'
+
+  efitiny:elf:amd64:
+    desc: 'Build app_amd64_efitiny.elf (TamaGo PIE, M6.2 parent probe).'
+    deps:
+      - check-toolchain
+      - chainedtinyA:efi:amd64
+      - chainedtinyB:efi:amd64
+      - chainedtinyC:efi:amd64
+      - chainedtinyZ:efi:amd64
+      - chainedtinyZ64K:efi:amd64
+      - chainedtinyZ1M:efi:amd64
+      - chainedtinyZ2M:efi:amd64
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_efi_tiny_handover -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_efitiny.elf .'
+
+  efitiny:efi:amd64:
+    desc: 'Build M6.2 BOOTX64-EFITINY.EFI (chained LoadImage threshold sweep parent).'
+    deps: [efitiny:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-EFITINY.EFI" "{{.TASKFILE_DIR}}/app_amd64_efitiny.elf"'
+
+  efitiny:live:amd64:
+    desc: 'Live M6.2 chained-LoadImage threshold sweep from BOOTX64-EFITINY.EFI under QEMU+EDK2.'
+    deps: [efitiny:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveefitinyhandover/run.sh" amd64'
+
   # uefiboard:test — host-side unit tests for the M0 parser/types
   # (memorymap.go, http_protocol.go). Does NOT exercise the live
   # GetMemoryMap call (that lives in the --tag phase2_probe binary;
@@ -1789,3 +1925,6 @@ tasks:
       - rm -f BOOTX64-CHAINED.EFI BOOTAA64-CHAINED.EFI BOOTRISCV64-CHAINED.EFI BOOTLOONGARCH64-CHAINED.EFI
       - rm -f BOOTX64-EFIHANDOVER.EFI BOOTAA64-EFIHANDOVER.EFI BOOTRISCV64-EFIHANDOVER.EFI BOOTLOONGARCH64-EFIHANDOVER.EFI
       - rm -f internal/embed_chained/chained_amd64.efi internal/embed_chained/chained_arm64.efi internal/embed_chained/chained_riscv64.efi internal/embed_chained/chained_loong64.efi
+      - rm -f app_amd64_chainedtinyA.elf app_amd64_chainedtinyB.elf app_amd64_chainedtinyC.elf app_amd64_efitiny.elf
+      - rm -f BOOTX64-CHAINEDTINYA.EFI BOOTX64-CHAINEDTINYB.EFI BOOTX64-CHAINEDTINYC.EFI BOOTX64-CHAINEDTINYZ.EFI BOOTX64-CHAINEDTINYZ64K.EFI BOOTX64-CHAINEDTINYZ1M.EFI BOOTX64-CHAINEDTINYZ2M.EFI BOOTX64-EFITINY.EFI
+      - rm -f internal/embed_chained_tiny/tiny_A_amd64.efi.gz internal/embed_chained_tiny/tiny_B_amd64.efi.gz internal/embed_chained_tiny/tiny_C_amd64.efi.gz internal/embed_chained_tiny/tiny_Z_amd64.efi.gz internal/embed_chained_tiny/tiny_Z64K_amd64.efi.gz internal/embed_chained_tiny/tiny_Z1M_amd64.efi.gz internal/embed_chained_tiny/tiny_Z2M_amd64.efi.gz
