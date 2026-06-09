@@ -1295,6 +1295,125 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/liveocistream/run.sh" loong64'
 
+  # ----- M7.alt — oras-go-v2 evaluation -----------------------------
+  # Parallel POC pulling the same artifact (ghcr.io/linuxcontainers/
+  # alpine:latest) via oras.land/oras-go/v2 routed through ministack's
+  # HTTPSGet/HTTPGet dial via a custom net/http.RoundTripper
+  # (uefiboard/ministack/orasoci/). Goal: measure binary-size delta vs.
+  # the hand-rolled M7 client + verify functional parity. Outputs go to
+  # BOOT<ARCH>-ORASOCI.EFI. Live runner skips amd64 pending M6.2
+  # (UPX-go) per the size discipline applied to M7.1a.
+  orasoci:elf:amd64:
+    desc: 'Build app_amd64_orasoci.elf (TamaGo PIE, M7.alt oras-go fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_oras_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_orasoci.elf .'
+
+  orasoci:elf:arm64:
+    desc: 'Build app_arm64_orasoci.elf (TamaGo PIE, M7.alt oras-go fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_oras_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_orasoci.elf .'
+
+  orasoci:elf:riscv64:
+    desc: 'Build app_riscv64_orasoci.elf (TamaGo PIE, M7.alt oras-go fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_oras_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_orasoci.elf .'
+
+  orasoci:elf:loong64:
+    desc: 'Build app_loong64_orasoci.elf (TamaGo PIE, M7.alt oras-go fetch probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_oras_fetch -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_orasoci.elf .'
+
+  orasoci:efi:amd64:
+    desc: 'Build Phase-2 M7.alt BOOTX64-ORASOCI.EFI (oras-go fetch probe).'
+    deps: [orasoci:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-ORASOCI.EFI" "{{.TASKFILE_DIR}}/app_amd64_orasoci.elf"'
+
+  orasoci:efi:arm64:
+    desc: 'Build Phase-2 M7.alt BOOTAA64-ORASOCI.EFI (oras-go fetch probe).'
+    deps: [orasoci:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-ORASOCI.EFI" "{{.TASKFILE_DIR}}/app_arm64_orasoci.elf"'
+
+  orasoci:efi:riscv64:
+    desc: 'Build Phase-2 M7.alt BOOTRISCV64-ORASOCI.EFI (oras-go fetch probe).'
+    deps: [orasoci:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-ORASOCI.EFI" "{{.TASKFILE_DIR}}/app_riscv64_orasoci.elf"'
+
+  orasoci:efi:loong64:
+    desc: 'Build Phase-2 M7.alt BOOTLOONGARCH64-ORASOCI.EFI (oras-go fetch probe).'
+    deps: [orasoci:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-ORASOCI.EFI" "{{.TASKFILE_DIR}}/app_loong64_orasoci.elf"'
+
+  orasoci:all:
+    desc: 'Build all four Phase-2 M7.alt oras-go fetch probe EFIs.'
+    cmds:
+      - task: orasoci:efi:amd64
+      - task: orasoci:efi:arm64
+      - task: orasoci:efi:riscv64
+      - task: orasoci:efi:loong64
+
+  orasoci:test:
+    desc: 'Run host-side ministack + orasoci unit tests (M7.alt coverage gate >=90%).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -cover -v ./uefiboard/ministack/orasoci/...
+
+  live:orasoci:amd64:
+    desc: 'Live M7.alt oras-go fetch — skipped: amd64 blocked by M6.2 (UPX-go).'
+    deps: [orasoci:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveorasoci/run.sh" amd64'
+
+  live:orasoci:arm64:
+    desc: 'Live M7.alt oras-go fetch against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTAA64-ORASOCI.EFI.'
+    deps: [orasoci:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveorasoci/run.sh" arm64'
+
+  live:orasoci:riscv64:
+    desc: 'Live M7.alt oras-go fetch against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTRISCV64-ORASOCI.EFI.'
+    deps: [orasoci:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveorasoci/run.sh" riscv64'
+
+  live:orasoci:loong64:
+    desc: 'Live M7.alt oras-go fetch against ghcr.io/linuxcontainers/alpine via QEMU NAT from BOOTLOONGARCH64-ORASOCI.EFI.'
+    deps: [orasoci:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveorasoci/run.sh" loong64'
+
   # ------------------------------------------------------------------
   # Phase 2 M8.0 — chain-boot mechanism. The parent EFI loads a
   # tiny chained EFI payload (cmd/chainedhello) embedded at build

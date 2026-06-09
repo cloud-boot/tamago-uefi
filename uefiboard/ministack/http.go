@@ -667,6 +667,38 @@ func newLineReader(r io.Reader) *lineReader {
 	return &lineReader{r: r, buf: make([]byte, streamReadBufBytes)}
 }
 
+// LineReader is the exported alias for lineReader, surfaced so that
+// parallel packages (e.g. ministack/orasoci) can reuse the line-
+// buffered reader behind a net/http.RoundTripper without
+// re-implementing it. The exported API is intentionally narrow:
+// ReadLine for header parsing + Read for body pulls.
+type LineReader = lineReader
+
+// NewLineReader is the exported constructor for the streamed-HTTP
+// line reader. Used by sibling packages building their own response
+// parsers atop a *TCP4Conn or *tls.Conn — for instance
+// ministack/orasoci's RoundTripper, which feeds the conn into
+// StreamHTTPResponseHeaders before handing the body to net/http.
+func NewLineReader(r io.Reader) *LineReader {
+	return newLineReader(r)
+}
+
+// StreamHTTPResponseHeaders is the exported variant of
+// streamHTTPResponseHeaders. It reads the status line + header block
+// from `br`, then streams the body into `dst` according to
+// Transfer-Encoding: chunked or Content-Length (falling back to
+// identity / read-until-EOF). The returned headers map is keyed
+// lowercase and contains content-type, content-length,
+// transfer-encoding, and location entries.
+//
+// Surfaced so sibling packages (ministack/orasoci) can implement
+// net/http.RoundTripper without duplicating the parser. The
+// unexported variant remains the in-package fast-path used by
+// HTTPGetStreamHeaders / HTTPSGetStreamHeaders.
+func StreamHTTPResponseHeaders(br *LineReader, dst io.Writer) (status int, written int64, headers map[string]string, err error) {
+	return streamHTTPResponseHeaders(br, dst)
+}
+
 // fill reads more bytes from the underlying reader into the buffer's
 // tail. Returns the same error semantics as r.Read (n>0 may come back
 // with err set).
