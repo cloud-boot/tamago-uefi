@@ -3,46 +3,26 @@
 //
 // efipackstub -- M6.2 PR2 self-extracting EFI stub (amd64).
 //
-// STATUS (2026-06-09, third sprint -- "option 2"): the previous two
-// sprints assumed firmware would map the `.payload` section into RAM
-// at its VirtualAddress. Two redesigns (the section-table-ordering
-// flip via peln/appender AppendBefore, then the "skip .reloc" theory)
-// both failed to produce a runnable packed binary -- on amd64 the
-// stub runs to main() but the bytes at ImageBase+payload.VA are zero,
-// so the CBP0 magic check fails and we exit via gBS->Exit with
-// EFI_ABORTED.
+// STATUS (2026-06-09, fourth sprint -- "deeper debug"): the first
+// three sprints produced (a) "fast-exit via gBS->Exit" then (b) "X64
+// Divide Error at RIP=0 mid-stub". ConOut printing trips the very
+// CpuPageTableLib #GP that motivated the de-risk in the first place,
+// so in-band logging is dead. This sprint wires the M1.6 Block-IO
+// side-channel ring buffer directly into the stub so we can drop a
+// breadcrumb to a scratch virtio-blk-pci disk at every meaningful
+// step. After a crash the host-side `blkprintk-recover` tool reads
+// the disk image and prints the last tracepoint that landed -- that's
+// the step that crashed.
 //
-// "Option 2" sidesteps the in-RAM mapping question entirely:
+// The runtime shape still mirrors cmd/chainedtinyC: no println, no
+// goos.Exit linkname hook. The blkprintk path goes directly via
+// uefiboard.BlockIOWriteBlocks + BlockIOFlushBlocks, bypassing
+// runtime.printk entirely -- this is the same channel M1.6 used to
+// recover output on Apple VZ where ConOut was unavailable.
 //
-//   1. HandleProtocol(EFI_LOADED_IMAGE_PROTOCOL) on our own image
-//      handle -> LoadedImage.DeviceHandle + LoadedImage.FilePath.
-//   2. HandleProtocol(EFI_SIMPLE_FILE_SYSTEM_PROTOCOL) on
-//      DeviceHandle -> sfs->OpenVolume(&root).
-//   3. Walk the FilePath DevicePath chain, accumulating FilePath
-//      (Media/0x04) UTF-16 components into a single path string
-//      (e.g. "\EFI\BOOT\BOOTX64.EFI").
-//   4. root->Open(path, EFI_FILE_MODE_READ, 0) -> EFI_FILE_PROTOCOL*
-//   5. file->GetInfo(EFI_FILE_INFO_GUID, &size, &info) to read the size.
-//   6. AllocatePool(size) -> buffer.
-//   7. file->Read(&size, buffer) to slurp the whole file into RAM.
-//   8. Close file + close root.
-//   9. Parse the buffer as a PE32+, find `.payload` at its on-disk
-//      offset (PointerToRawData), validate CBP0, decompress, chain
-//      via gBS->LoadImage + gBS->StartImage.
-//
-// Because step 7 reads from disk (the SimpleFileSystem layer
-// understands the FAT filesystem on the ESP), we recover the FULL
-// on-disk PE bytes -- including the `.payload` section body that the
-// firmware refused to map.
-//
-// What's PRESERVED from the previous sprint:
-//   - peln/appender.AppendBefore is LANDED upstream regardless --
-//     structurally cleaner shape for any packer that needs to
-//     interleave headers around the relocation directory.
-//   - The stub's runtime shape mirrors cmd/chainedtinyC: no println,
-//     no goos.Exit linkname hook (the M6.2 de-risk sweep showed those
-//     two behaviours trigger the EDK2 OVMF CpuPageTableLib #GP at
-//     CpuDxe.dll+0x110C during a parent's StartImage call).
+// What "option 2" does (re-read our own file off disk via
+// SimpleFileSystem) is preserved unchanged; only the instrumentation
+// is new.
 //
 // Build (TamaGo PIE, amd64):
 //
@@ -153,31 +133,13 @@ const efiFileModeRead uint64 = 0x0000000000000001
 //	0  UINT8   Type
 //	1  UINT8   SubType
 //	2  UINT16  Length (total node length including header)
-//
-// Media type = 0x04, FilePath subtype = 0x04 -- the only node kind we
-// extract path components from. Path16[] (UTF-16 LE, NUL-terminated)
-// fills bytes 4..Length.
-//
-// End-of-Hardware node: Type 0x7F, SubType 0xFF (or 0x01 for end-of-
-// instance which we treat the same way).
 const (
 	dpTypeMedia       = 0x04
 	dpSubTypeFilePath = 0x04
 	dpTypeEnd         = 0x7F
 )
 
-// EFI_FILE_INFO header (UEFI 2.10 §13.5.16): the dynamic FileName
-// field starts at offset 80. We only care about FileSize at offset 8
-// for the buffer-sizing pass.
-//
-//	0   UINT64  Size           // total size of this struct incl. FileName
-//	8   UINT64  FileSize
-//	16  UINT64  PhysicalSize
-//	24  EFI_TIME CreateTime    // 16 bytes
-//	40  EFI_TIME LastAccessTime
-//	56  EFI_TIME ModificationTime
-//	72  UINT64  Attribute
-//	80  CHAR16  FileName[]
+// EFI_FILE_INFO header (UEFI 2.10 §13.5.16): FileSize at offset 8.
 const fileInfoFileSize = 8
 
 // Wire-format constants mirrored from go-coff/efipack:
@@ -206,12 +168,162 @@ const efiAborted uintptr = 0x8000000000000015
 // efiSuccess in the raw uint64 status space.
 const efiSuccess uint64 = 0
 
+// EFI_BUFFER_TOO_SMALL on a 64-bit UEFI -- expected from the
+// probe call to file->GetInfo with a NULL buffer.
+const efiBufferTooSmall uint64 = 0x8000000000000005
+
+// blkprintk side-channel singleton. Bound (or left nil) by setupBlkprintk
+// at the very start of main(). Every tp() call appends to it and
+// flushes immediately so a crash leaves the LAST printed step on
+// disk -- the host-side blkprintk-recover then reports it.
+var blkRing *uefiboard.BlkRingBuffer
+
+// setupBlkprintk walks every EFI_BLOCK_IO_PROTOCOL handle, reads
+// LBA 0, and binds blkRing to the first handle whose LBA 0 carries
+// uefiboard.BlkPrintkScratchMagic. Failure to find one leaves
+// blkRing == nil and tp() degrades to a no-op (stub still runs,
+// nothing is observable on the side-channel).
+//
+// All side-channel setup happens BEFORE we touch the actual stub
+// work, so any crash inside the work path is recoverable.
+func setupBlkprintk() {
+	handles, err := uefiboard.LocateHandleBuffer(&uefiboard.EFIBlockIOProtocolGUID)
+	if err != nil || len(handles) == 0 {
+		return
+	}
+	for _, h := range handles {
+		iface, err := uefiboard.HandleProtocol(h, &uefiboard.EFIBlockIOProtocolGUID)
+		if err != nil || iface == 0 {
+			continue
+		}
+		media, ok := uefiboard.BlockIOMedia(iface)
+		if !ok {
+			continue
+		}
+		if media.MediaPresent == 0 || media.ReadOnly != 0 || media.LogicalPartition != 0 {
+			continue
+		}
+		if media.BlockSize == 0 {
+			continue
+		}
+		buf := make([]byte, int(media.BlockSize))
+		if err := uefiboard.BlockIOReadBlocks(iface, media.MediaId, 0, buf); err != nil {
+			continue
+		}
+		if !matchesScratchMagic(buf) {
+			continue
+		}
+		ring := uefiboard.NewBlkRingBuffer()
+		if err := ring.BindBlockIO(iface, media.MediaId, media.BlockSize, 0); err != nil {
+			continue
+		}
+		blkRing = ring
+		return
+	}
+}
+
+func matchesScratchMagic(buf []byte) bool {
+	if len(buf) < len(uefiboard.BlkPrintkScratchMagic) {
+		return false
+	}
+	for i, b := range uefiboard.BlkPrintkScratchMagic {
+		if buf[i] != b {
+			return false
+		}
+	}
+	return true
+}
+
+// tp prints one tracepoint line to the side-channel ring buffer and
+// flushes immediately. After a crash the host reads the disk image
+// and the last line printed identifies the step that faulted.
+//
+// Idempotent on nil ring (no scratch disk present -> degrades to
+// no-op silently).
+func tp(s string) {
+	if blkRing == nil {
+		return
+	}
+	blkRing.AppendString(s)
+	blkRing.Append('\n')
+	_ = blkRing.Flush()
+}
+
+// tpHex appends the line "<tag>=0x<hex>" then flushes. Used for
+// non-zero pointer / size values worth recovering post-crash.
+func tpHex(tag string, v uint64) {
+	if blkRing == nil {
+		return
+	}
+	blkRing.AppendString(tag)
+	blkRing.AppendString("=0x")
+	appendHex(blkRing, v)
+	blkRing.Append('\n')
+	_ = blkRing.Flush()
+}
+
+// tpDec appends the line "<tag>=<decimal>" then flushes. Used for
+// human-friendly counts (file size, page count, byte count).
+func tpDec(tag string, v uint64) {
+	if blkRing == nil {
+		return
+	}
+	blkRing.AppendString(tag)
+	blkRing.Append('=')
+	appendDec(blkRing, v)
+	blkRing.Append('\n')
+	_ = blkRing.Flush()
+}
+
+// appendHex writes v as exactly 16 lowercase hex chars (no 0x prefix)
+// into the ring. Fixed width so the host sees a predictable layout.
+func appendHex(r *uefiboard.BlkRingBuffer, v uint64) {
+	const digits = "0123456789abcdef"
+	var buf [16]byte
+	for i := 15; i >= 0; i-- {
+		buf[i] = digits[v&0xf]
+		v >>= 4
+	}
+	for i := 0; i < 16; i++ {
+		r.Append(buf[i])
+	}
+}
+
+// appendDec writes v as decimal (no leading zeros) into the ring.
+func appendDec(r *uefiboard.BlkRingBuffer, v uint64) {
+	if v == 0 {
+		r.Append('0')
+		return
+	}
+	var buf [20]byte
+	n := 0
+	for v > 0 {
+		buf[n] = byte('0' + v%10)
+		v /= 10
+		n++
+	}
+	for i := n - 1; i >= 0; i-- {
+		r.Append(buf[i])
+	}
+}
+
 // main is the stub entry from the firmware's perspective (via
 // cpuinit_amd64.s -> runtime.rt0 -> main). We deliberately avoid
 // println, fmt, and any goos.Exit linkname hook -- see the package
 // comment for why.
 func main() {
+	setupBlkprintk()
+	tp("efipackstub: entered main")
+
 	status := run()
+
+	tp("efipackstub: run() returned")
+	tpHex("status", uint64(status))
+	tp("efipackstub: calling gBS->Exit")
+	if blkRing != nil {
+		blkRing.Append(uefiboard.BlkSentinel)
+		_ = blkRing.Flush()
+	}
 	_ = uefiboard.ExitImage(myImageHandle(), status)
 	for {
 	}
@@ -221,79 +333,113 @@ func main() {
 // gBS->Exit. EFI_SUCCESS (0) for the happy path; EFI_ABORTED for any
 // internal failure.
 func run() uintptr {
+	tp("efipackstub: entering run()")
+
 	peBytes, ok := readOwnFile()
 	if !ok {
+		tp("efipackstub: readOwnFile FAILED")
 		return efiAborted
 	}
+	tpDec("peBytes.len", uint64(len(peBytes)))
 
+	tp("efipackstub: parsing PE for .payload (on-disk)")
 	payload, ok := findPayloadOnDisk(peBytes)
 	if !ok {
+		tp("efipackstub: findPayloadOnDisk FAILED")
 		return efiAborted
 	}
+	tpDec("payload.len", uint64(len(payload)))
+
 	if len(payload) < payloadHeaderSize {
+		tp("efipackstub: payload shorter than header")
 		return efiAborted
 	}
 	if string(payload[0:4]) != payloadMagic {
+		tp("efipackstub: payload magic mismatch")
 		return efiAborted
 	}
 	if string(payload[4:8]) != algoFlat {
+		tp("efipackstub: payload algo != FLAT")
 		return efiAborted
 	}
 	uncompressedSize := binary.LittleEndian.Uint64(payload[8:16])
 	compressedSize := binary.LittleEndian.Uint64(payload[16:24])
+	tpDec("uncompressedSize", uncompressedSize)
+	tpDec("compressedSize", compressedSize)
 	if uint64(len(payload))-payloadHeaderSize < compressedSize {
+		tp("efipackstub: compressed body underruns payload")
 		return efiAborted
 	}
 	if uncompressedSize == 0 {
+		tp("efipackstub: uncompressedSize is zero")
 		return efiAborted
 	}
 	compressed := payload[payloadHeaderSize : payloadHeaderSize+int(compressedSize)]
 
+	tp("efipackstub: AllocatePages for decompressed image")
 	pageCount := (uintptr(uncompressedSize) + efiPageSize - 1) / efiPageSize
+	tpDec("pageCount", uint64(pageCount))
 	addr, err := uefiboard.AllocatePages(efiLoaderCode, pageCount)
 	if err != nil || addr == 0 {
+		tp("efipackstub: AllocatePages FAILED")
 		return efiAborted
 	}
+	tpHex("pagesAddr", addr)
+
 	dst := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(addr))), int(uncompressedSize))
 
+	tp("efipackstub: decompressing flate stream")
 	if !flateDecode(compressed, dst) {
+		tp("efipackstub: flateDecode FAILED")
 		return efiAborted
 	}
+	tp("efipackstub: decompress OK")
 
+	tp("efipackstub: gBS->LoadImage on decompressed bytes")
 	child, lerr := uefiboard.LoadImage(dst)
 	if lerr != nil {
+		tp("efipackstub: LoadImage FAILED")
 		return efiAborted
 	}
+	tpHex("childHandle", uint64(child))
+
+	tp("efipackstub: gBS->StartImage on child")
 	st, _ := uefiboard.StartImage(child)
+	tp("efipackstub: StartImage returned")
+	tpHex("childStatus", uint64(st))
 	return st
 }
 
 // readOwnFile re-reads our own EFI file off the boot volume via the
 // EFI_LOADED_IMAGE_PROTOCOL.DeviceHandle + EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
 // pair. Returns the full on-disk PE bytes.
-//
-// This is the heart of "option 2": rather than trust whatever
-// in-memory layout the firmware chose for us, we re-fetch our own
-// file from disk so the `.payload` section is recoverable at its
-// PointerToRawData offset regardless of what the in-RAM section
-// mapping looks like.
 func readOwnFile() ([]byte, bool) {
-	// Step 1: LOADED_IMAGE_PROTOCOL on our own image handle.
+	tp("readOwnFile: HandleProtocol(LOADED_IMAGE)")
 	li, err := uefiboard.HandleProtocol(myImageHandleU64(), &loadedImageGUID)
 	if err != nil || li == 0 {
+		tp("readOwnFile: LOADED_IMAGE handle FAILED")
 		return nil, false
 	}
+	tpHex("li", li)
+
 	devHandle := *(*uint64)(unsafe.Pointer(uintptr(li) + liDeviceHandle))
 	filePathPtr := *(*uint64)(unsafe.Pointer(uintptr(li) + liFilePath))
+	tpHex("devHandle", devHandle)
+	tpHex("filePathPtr", filePathPtr)
 	if devHandle == 0 || filePathPtr == 0 {
+		tp("readOwnFile: NULL devHandle or filePath")
 		return nil, false
 	}
 
-	// Step 2: SimpleFileSystem on the DeviceHandle, then OpenVolume.
+	tp("readOwnFile: HandleProtocol(SIMPLE_FILE_SYSTEM) on devHandle")
 	sfs, err := uefiboard.HandleProtocol(devHandle, &simpleFSGUID)
 	if err != nil || sfs == 0 {
+		tp("readOwnFile: SIMPLE_FILE_SYSTEM handle FAILED")
 		return nil, false
 	}
+	tpHex("sfs", sfs)
+
+	tp("readOwnFile: sfs->OpenVolume")
 	var root uint64
 	status := uefiboard.EFICall(
 		sfs+sfsOpenVolume,
@@ -302,18 +448,22 @@ func readOwnFile() ([]byte, bool) {
 		0, 0, 0, 0,
 	)
 	if status != efiSuccess || root == 0 {
+		tp("readOwnFile: OpenVolume FAILED")
+		tpHex("openVolumeStatus", status)
 		return nil, false
 	}
+	tpHex("root", root)
 
-	// Step 3: walk the DevicePath chain in LoadedImage.FilePath,
-	// gathering File-Path nodes into a UTF-16 path.
+	tp("readOwnFile: buildPath16 from FilePath chain")
 	path16 := buildPath16(filePathPtr)
 	if len(path16) == 0 {
+		tp("readOwnFile: buildPath16 produced empty path")
 		closeFile(root)
 		return nil, false
 	}
+	tpDec("path16.len", uint64(len(path16)))
 
-	// Step 4: root->Open(path).
+	tp("readOwnFile: root->Open(path)")
 	var file uint64
 	status = uefiboard.EFICall(
 		root+fileOpen,
@@ -325,23 +475,27 @@ func readOwnFile() ([]byte, bool) {
 		0,
 	)
 	if status != efiSuccess || file == 0 {
+		tp("readOwnFile: Open(path) FAILED")
+		tpHex("openStatus", status)
 		closeFile(root)
 		return nil, false
 	}
+	tpHex("file", file)
 
-	// Step 5: file->GetInfo(EFI_FILE_INFO_GUID).
+	tp("readOwnFile: getFileSize via GetInfo")
 	size, ok := getFileSize(file)
 	if !ok || size == 0 {
+		tp("readOwnFile: getFileSize FAILED")
 		closeFile(file)
 		closeFile(root)
 		return nil, false
 	}
+	tpDec("fileSize", size)
 
-	// Step 6: allocate buffer (Go-allocated slice; the firmware
-	// only needs a pointer + size for Read).
+	tp("readOwnFile: allocating Go buffer for Read")
 	buf := make([]byte, size)
 
-	// Step 7: file->Read(&size, buf).
+	tp("readOwnFile: file->Read")
 	readSize := uintptr(size)
 	status = uefiboard.EFICall(
 		file+fileRead,
@@ -353,18 +507,20 @@ func readOwnFile() ([]byte, bool) {
 	closeFile(file)
 	closeFile(root)
 	if status != efiSuccess {
+		tp("readOwnFile: Read FAILED")
+		tpHex("readStatus", status)
 		return nil, false
 	}
+	tpDec("readSize", uint64(readSize))
 	if uint64(readSize) != size {
-		// Short read; refuse to proceed with a truncated PE.
+		tp("readOwnFile: short Read")
 		return nil, false
 	}
+	tp("readOwnFile: OK")
 	return buf, true
 }
 
-// closeFile invokes the EFI_FILE_PROTOCOL.Close slot. Errors are
-// ignored -- there is nothing useful we can do with them at this
-// point in the stub's lifetime.
+// closeFile invokes the EFI_FILE_PROTOCOL.Close slot.
 func closeFile(file uint64) {
 	if file == 0 {
 		return
@@ -377,13 +533,12 @@ func closeFile(file uint64) {
 }
 
 // getFileSize calls file->GetInfo(EFI_FILE_INFO_GUID, ...) twice: once
-// with size=0 to get the required buffer size, then once with the
-// real buffer. Returns the FileSize field at offset 8 of the returned
-// struct.
+// with a NULL buffer to get the required size, then once with the real
+// buffer.
 func getFileSize(file uint64) (uint64, bool) {
-	// First call: probe required buffer size.
+	tp("getFileSize: probe (NULL buffer)")
 	var bufSize uintptr
-	status := uefiboard.EFICall(
+	_ = uefiboard.EFICall(
 		file+fileGetInfo,
 		file,
 		uint64(uintptr(unsafe.Pointer(&fileInfoGUID))),
@@ -391,15 +546,14 @@ func getFileSize(file uint64) (uint64, bool) {
 		0, // Buffer = NULL
 		0, 0,
 	)
-	// Expected: EFI_BUFFER_TOO_SMALL = 0x8000000000000005. bufSize is
-	// now the required size. Anything else (including success on a
-	// firmware that pre-fills a small buffer for us) we also handle
-	// by falling through.
+	tpDec("bufSize.probe", uint64(bufSize))
 	if bufSize == 0 {
+		tp("getFileSize: bufSize stayed zero after probe")
 		return 0, false
 	}
+	tp("getFileSize: allocating + second GetInfo")
 	buf := make([]byte, bufSize)
-	status = uefiboard.EFICall(
+	status := uefiboard.EFICall(
 		file+fileGetInfo,
 		file,
 		uint64(uintptr(unsafe.Pointer(&fileInfoGUID))),
@@ -408,29 +562,20 @@ func getFileSize(file uint64) (uint64, bool) {
 		0, 0,
 	)
 	if status != efiSuccess {
+		tp("getFileSize: second GetInfo FAILED")
+		tpHex("getInfoStatus", status)
 		return 0, false
 	}
 	if uintptr(len(buf)) < fileInfoFileSize+8 {
+		tp("getFileSize: buffer too small to hold FileSize field")
 		return 0, false
 	}
 	return binary.LittleEndian.Uint64(buf[fileInfoFileSize : fileInfoFileSize+8]), true
 }
 
-// buildPath16 walks the EFI_DEVICE_PATH_PROTOCOL chain starting at
-// dp, concatenating every Media/FilePath (0x04/0x04) node's Path16
-// content into a single NUL-terminated UTF-16 path suitable for
-// passing to EFI_FILE_PROTOCOL.Open.
-//
-// Components from each FilePath node are concatenated as-is. UEFI
-// FilePath nodes for individual path components typically already
-// include the leading backslash separator (e.g. "\EFI", then
-// "\BOOT", then "\BOOTX64.EFI"). For the common case where the
-// firmware packs the whole "\EFI\BOOT\BOOTX64.EFI" string into a
-// single FilePath node, this also Just Works.
-//
-// Returns nil if no FilePath nodes were found. Defensively caps the
-// walk at a sane node count to avoid wandering off into firmware
-// memory if a malformed chain is presented.
+// buildPath16 walks the EFI_DEVICE_PATH_PROTOCOL chain starting at dp,
+// concatenating every Media/FilePath (0x04/0x04) node's Path16 content
+// into a single NUL-terminated UTF-16 path.
 func buildPath16(dp uint64) []uint16 {
 	if dp == 0 {
 		return nil
@@ -450,12 +595,9 @@ func buildPath16(dp uint64) []uint16 {
 			break
 		}
 		if t == dpTypeMedia && st == dpSubTypeFilePath {
-			// UTF-16 path data starts at offset 4, runs to ln.
 			n16 := (uintptr(ln) - 4) / 2
 			if n16 > 0 {
 				src := unsafe.Slice((*uint16)(unsafe.Pointer(cur+4)), int(n16))
-				// Trim a trailing NUL on this node so the joined
-				// result has exactly one terminator at the end.
 				if src[len(src)-1] == 0 {
 					src = src[:len(src)-1]
 				}
@@ -467,16 +609,13 @@ func buildPath16(dp uint64) []uint16 {
 	if len(out) == 0 {
 		return nil
 	}
-	// NUL-terminate.
 	out = append(out, 0)
 	return out
 }
 
 // findPayloadOnDisk walks the section table of the PE bytes (read
 // from disk) and returns the `.payload` section body using its
-// PointerToRawData / SizeOfRawData fields -- not the in-memory
-// VirtualAddress view. Validates the CBP0 magic at the head of the
-// candidate region.
+// PointerToRawData / SizeOfRawData fields.
 func findPayloadOnDisk(pe []byte) ([]byte, bool) {
 	if len(pe) < 0x40 || pe[0] != 'M' || pe[1] != 'Z' {
 		return nil, false
@@ -520,8 +659,6 @@ func findPayloadOnDisk(pe []byte) ([]byte, bool) {
 	return nil, false
 }
 
-// hasPayloadMagic returns true iff b starts with the CBP0 wire
-// magic.
 func hasPayloadMagic(b []byte) bool {
 	if len(b) < 4 {
 		return false
@@ -567,3 +704,8 @@ func flateDecode(src, dst []byte) bool {
 	}
 	return true
 }
+
+// efiBufferTooSmall reference kept so the constant doesn't go unused
+// when someone re-introduces a buffer-too-small fallback path -- we
+// expect that exact status from getFileSize's probe call.
+var _ = efiBufferTooSmall
