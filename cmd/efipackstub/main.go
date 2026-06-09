@@ -3,48 +3,56 @@
 //
 // efipackstub -- M6.2 PR2 self-extracting EFI stub (amd64).
 //
-// STATUS (2026-06-09 sprint): the stub builds, links, loads under
-// EDK2 OVMF q35, and main() runs correctly. The chain-boot path
-// does NOT yet work because EDK2's PE loader does not appear to map
-// the `.payload` section the host-side packer appends past .reloc.
-// At runtime, ImageBase + payload.VirtualAddress holds zeros (or
-// stale runtime data) rather than the section's raw file bytes.
-// PR2-next-sprint follow-up below.
+// STATUS (2026-06-09, two sprints in): the stub builds, links, loads
+// under EDK2 OVMF q35, and main() runs to completion. Section-mapping
+// of `.payload` is still NOT working, AND the section-table-ordering
+// fix the previous sprint hypothesised was the cause is not sufficient
+// on its own. The packer (go-coff/efipack) was switched to insert
+// `.payload` BEFORE `.reloc` via peln/appender AppendBefore (clean
+// peln addition, 100 % cov), but the live amd64 smoke matrix still
+// shows the same fast-exit-to-shell behaviour for the packed HTTP
+// binary -- meaning `run()` is hitting one of the early
+// `return efiAborted` paths and gBS->Exit is returning control to the
+// firmware shell.
 //
-// What does work:
-//   - cpuinit_amd64.s -> rt0 -> main is reached (proved via debug
-//     prints; this version restores the no-print contract for the
-//     final stub blob).
-//   - HandleProtocol(EFI_LOADED_IMAGE_PROTOCOL_GUID) on our own
-//     image handle returns a valid LOADED_IMAGE; ImageBase points
-//     at a valid MZ header; ImageSize matches the optional header's
-//     SizeOfImage post-append.
-//   - The PE section table walk finds the `.payload` section header
-//     correctly (matching VirtualAddress and sizes).
-//   - The host-side packer (go-coff/efipack) writes a structurally
-//     valid envelope and the file's CBP0 magic is at the section's
-//     PointerToRawData (verified with xxd).
+// Diagnosis re-assessment (post-sprint-2): a read of
+// MdePkg/Library/BasePeCoffLib/BasePeCoff.c::PeCoffLoaderLoadImage
+// shows the section-load loop iterates the FULL section table (line
+// 1391 `for (Index = 0; Index < NumberOfSections; Index++)`) and does
+// NOT short-circuit at the relocation directory. The "skips after
+// .reloc" theory was therefore wrong. The behavioural symptom (zero
+// bytes at ImageBase + .payload.VA) must have a different upstream
+// cause -- candidates yet to verify:
+//   a. The DxeCore (not BasePeCoffLib) layer applies a security /
+//      memory-attribute pass that zero-fills MEM_DISCARDABLE
+//      neighbouring data. .reloc has IMAGE_SCN_MEM_DISCARDABLE set;
+//      .payload sits next to it in the VA layout.
+//   b. SizeOfImage / SizeOfRawData truncation interacts with the
+//      InitializedData-only Characteristics flags we set.
+//   c. A separate runtime bug (e.g. unsafe.Slice over an address
+//      range firmware hasn't mapped) -- TamaGo PIE may treat
+//      `imageBytes[:size]` differently than expected.
 //
-// What does NOT yet work, from observed behaviour:
-//   - At runtime, the bytes at ImageBase + payload.VirtualAddress
-//     are NOT the section's raw data. A byte-by-byte scan of the
-//     loaded image at runtime finds CBP0 magic in our .text
-//     (literal embedded constant) and in some .data regions, but
-//     NOT at the expected `.payload` virtual address.
+// Live amd64 smoke results with AppendBefore-flip:
+//   - HTTP original  : PASS (regression-baseline intact)
+//   - HTTP packed    : FAIL (stub runs main, exits via gBS->Exit
+//                            with non-success status; child never
+//                            reaches HTTP-GET OK)
+//   - HTTPS / OCI / EFIHANDOVER not run -- gated on HTTP.
 //
-// Most likely root cause: EDK2's CoreLoadImage stops iterating
-// section headers once it has applied the relocation directory
-// (data dir #5). Since the packer appends `.payload` AFTER `.reloc`
-// in the section table, the section header is preserved but the
-// loader never copies the raw bytes into memory.
+// Three follow-up options remain valid; option 2 (re-read file via
+// SimpleFileSystem) is now the recommended next move because it
+// sidesteps both the EDK2 mapping question AND any
+// MEM_DISCARDABLE-neighbour zeroing:
 //
-// Next-sprint follow-up options:
-//   1. Append `.payload` BEFORE `.reloc` in the appender's section
-//      table (peln/appender change). Probably the cleanest fix.
-//   2. Have the stub re-read its own file via
+//   1. AppendBefore is LANDED in peln + efipack regardless -- it is
+//      a structurally cleaner shape and useful for future packers
+//      that need to interleave headers around the relocation
+//      directory. Test coverage = 100 %.
+//   2. Re-read the stub's own file via
 //      LOADED_IMAGE_PROTOCOL.DeviceHandle +
 //      SimpleFileSystemProtocol -> Open -> Read on the FilePath.
-//      Robust, but requires a small new uefiboard wrapper.
+//      Robust against any in-memory section-mapping quirk.
 //   3. Inline the compressed payload bytes inside the stub's
 //      `.rodata` via a sentinel slot the packer overwrites
 //      post-link. Wastes the maximum-payload-size's worth of
