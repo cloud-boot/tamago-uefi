@@ -85,14 +85,49 @@ import (
 	"github.com/cloud-boot/tamago-uefi/uefiboard/ministack/oci"
 )
 
-// kernelBootTargetRef is the OCI artifact the MODE A path fetches.
-// Empty = MODE B (self-test against an in-process Transport).
+// kernelBootTargetRef is the OCI artifact the MODE A / MODE C path
+// fetches. Empty = MODE B (self-test against an in-process Transport).
 //
-// Wiring MODE A against a publicly-pushed BOOT*-CHAINED.EFI (or a
-// small EFI-stub Linux kernel) is the M8.2 follow-up — see
-// cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.1 for the
-// blocker (no `write:packages` PAT in the M8.1 budget).
+// Wiring MODE A / MODE C against a publicly-pushed BOOT*-CHAINED.EFI
+// (or a small EFI-stub Linux kernel) is the M8.2 follow-up — see
+// cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.2 for the
+// blocker (no `write:packages` PAT in the M8.1 budget; M8.2 needs a
+// public EFI-stub kernel OCI ref).
 const kernelBootTargetRef = ""
+
+// kernelBootCmdline is the Linux kernel command line installed via
+// uefiboard.SetLoadOptions before StartImage. Empty = no cmdline
+// install; non-empty + non-empty kernelBootTargetRef = MODE C.
+//
+// Typical values (left here for docs; populate when wiring MODE C
+// against a public kernel ref):
+//
+//	"console=ttyAMA0 root=/dev/ram0"     (arm64 virt)
+//	"console=ttyS0 earlyprintk=ttyS0"     (amd64 OVMF)
+//	"console=hvc0 root=/dev/ram0"         (riscv64 virt)
+//
+// The Linux EFI-stub reads it from LoadedImageProtocol.LoadOptions
+// of its own image handle (UEFI 2.10 §9.2 / Documentation/admin-
+// guide/efi-stub.rst).
+const kernelBootCmdline = ""
+
+// kernelBootInitrdRef is the OCI ref the MODE C path streams to
+// obtain the initrd. Empty = no initrd install; the Linux EFI-stub
+// will boot off the kernel only (acceptable for a busybox-style
+// kernel image with built-in initramfs, fails for distro kernels).
+//
+// When set, the MODE C flow publishes an EFI_LOAD_FILE2_PROTOCOL
+// under LINUX_EFI_INITRD_MEDIA_GUID via uefiboard.PublishInitrd
+// before StartImage and unpublishes after.
+//
+// M8.2-PARTIAL caveat: uefiboard.PublishInitrd currently installs
+// the device path + protocol struct but the LoadFile slot is NULL
+// pending the per-arch firmware-callback asm trampoline (see
+// uefiboard/initrd_protocol_tamago.go). A real EFI-stub that calls
+// LoadFile2->LoadFile on the published handle will fault. Setting
+// kernelBootInitrdRef in this build wires the framework but is not
+// expected to boot end-to-end against an upstream kernel.
+const kernelBootInitrdRef = ""
 
 // kernelBootSelfTestRef is the synthetic ref the MODE B path uses to
 // stand up its in-process Registry. The host string is intentionally
@@ -103,8 +138,28 @@ const kernelBootSelfTestRef = "https://localhost.m81-selftest.invalid/cloud-boot
 
 // runOCIKernelBootProbe is the entry point the dispatcher calls when
 // the `phase2_oci_kernel_boot` build tag is set.
+//
+// Three-way mode dispatch (M8.2):
+//
+//   - MODE B (default): kernelBootTargetRef == "" → self-test against
+//     an in-process oci.Transport serving the embedded chained EFI
+//     bytes. Proves the streaming + LoadImage + StartImage chain;
+//     no cmdline / no initrd path.
+//
+//   - MODE A: kernelBootTargetRef != "" && kernelBootCmdline == ""
+//     → real-registry streaming + LoadImage + StartImage. Same shape
+//     as M8.1 minimal MODE A.
+//
+//   - MODE C: kernelBootTargetRef != "" && kernelBootCmdline != ""
+//     → real-registry streaming + (optional) initrd publish +
+//     SetLoadOptions + LoadImage + StartImage. The Linux-kernel-
+//     specific path; the kernel EFI-stub reads cmdline from
+//     LoadedImageProtocol.LoadOptions and initrd via
+//     EFI_LOAD_FILE2_PROTOCOL @ LINUX_EFI_INITRD_MEDIA_GUID. The
+//     initrd protocol is M8.2-PARTIAL (framework only); see
+//     uefiboard/initrd_protocol_tamago.go.
 func runOCIKernelBootProbe() {
-	println("phase2-oci-kernel-boot: M8.1-minimal -- streaming OCI fetch + LoadImage + StartImage")
+	println("phase2-oci-kernel-boot: M8.2 -- streaming OCI fetch + LoadImage + StartImage + Linux kernel helpers")
 	println("phase2-oci-kernel-boot: arch =", runtime.GOARCH)
 
 	if kernelBootTargetRef == "" {
@@ -113,9 +168,22 @@ func runOCIKernelBootProbe() {
 		return
 	}
 
-	println("phase2-oci-kernel-boot: MODE = real-registry")
+	if kernelBootCmdline == "" {
+		println("phase2-oci-kernel-boot: MODE = A (real-registry, no cmdline/initrd)")
+		println("phase2-oci-kernel-boot: target =", kernelBootTargetRef)
+		runKernelBootRealRegistry()
+		return
+	}
+
+	println("phase2-oci-kernel-boot: MODE = C (real-registry + Linux kernel helpers)")
 	println("phase2-oci-kernel-boot: target =", kernelBootTargetRef)
-	runKernelBootRealRegistry()
+	println("phase2-oci-kernel-boot: cmdline =", kernelBootCmdline)
+	if kernelBootInitrdRef != "" {
+		println("phase2-oci-kernel-boot: initrd =", kernelBootInitrdRef)
+	} else {
+		println("phase2-oci-kernel-boot: initrd = (none)")
+	}
+	runKernelBootLinuxKernel()
 }
 
 // runKernelBootSelfTest exercises the OCI streaming + LoadImage +
@@ -435,4 +503,37 @@ func hexUintptrKernelBoot(v uintptr) string {
 	i--
 	buf[i] = '0'
 	return string(buf[i:])
+}
+
+// runKernelBootLinuxKernel is the MODE C entry — real-registry
+// streaming + SetLoadOptions(cmdline) + (optional) PublishInitrd +
+// LoadImage + StartImage. Fires when kernelBootTargetRef AND
+// kernelBootCmdline are both non-empty.
+//
+// In this build both are empty (no public OCI ref for an EFI-stub
+// Linux kernel + no write:packages PAT to publish our own; tracked
+// as M8.2 follow-up). The function is therefore dormant — if it is
+// ever called (dispatcher mode check satisfied) it prints a clear
+// "dormant" message and returns. The kernel-specific wiring lives
+// in uefiboard/load_options.go + uefiboard/initrd_protocol.go and
+// is exercised by the host-side unit tests; the live path here
+// stays inert until a real kernel ref is configured.
+func runKernelBootLinuxKernel() {
+	println("phase2-oci-kernel-boot: MODE C invoked but dormant in this build")
+	println("phase2-oci-kernel-boot:   kernelBootTargetRef    =", kernelBootTargetRef)
+	println("phase2-oci-kernel-boot:   kernelBootCmdline len  =", len(kernelBootCmdline))
+	println("phase2-oci-kernel-boot:   kernelBootInitrdRef    =", kernelBootInitrdRef)
+	println("phase2-oci-kernel-boot: framework wired (uefiboard.SetLoadOptions +")
+	println("phase2-oci-kernel-boot: uefiboard.PublishInitrd) — populate the constants")
+	println("phase2-oci-kernel-boot: against a public EFI-stub kernel OCI ref to enable.")
+	println("phase2-oci-kernel-boot: see cloud-boot/docs/tamago-uefi-phase2-oci-loader.md")
+	println("phase2-oci-kernel-boot:   section M8.2 for the wiring + live-test plan.")
+	println("phase2-oci-kernel-boot: KERNEL-BOOT FAIL: MODE C dormant (M8.2 follow-up)")
+	// Touch the new uefiboard symbols so the build doesn't garbage-collect
+	// the load-options + initrd-protocol surface area away when MODE C is
+	// dormant. The closures here are unreachable but keep the linker
+	// honest about which symbols are part of the cloud-boot ABI.
+	_ = uefiboard.SetLoadOptions
+	_ = uefiboard.PublishInitrd
+	_ = uefiboard.UnpublishInitrd
 }
