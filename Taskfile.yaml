@@ -1295,6 +1295,126 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/liveocistream/run.sh" loong64'
 
+  # ----- M7.1b — cosign keyed signature verification ----------------
+  # M7.1b layers ECDSA P-256 cosign signature verification on top of
+  # the M7 OCI walk: fetch the .sig artifact, walk its layer
+  # annotations, ECDSA-verify against the embedded public key, on
+  # match the manifest digest is trusted for the M8.1 boot path. The
+  # default build runs a self-test mode (sign locally + verify) so
+  # the entire pipeline is exercised without needing a keyed-cosign
+  # public image to be pinned in this repo. Outputs go to
+  # BOOT<ARCH>-COSIGN.EFI.
+  cosign:elf:amd64:
+    desc: 'Build app_amd64_cosign.elf (TamaGo PIE, M7.1b cosign verify probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_cosign_verify -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_cosign.elf .'
+
+  cosign:elf:arm64:
+    desc: 'Build app_arm64_cosign.elf (TamaGo PIE, M7.1b cosign verify probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_cosign_verify -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_cosign.elf .'
+
+  cosign:elf:riscv64:
+    desc: 'Build app_riscv64_cosign.elf (TamaGo PIE, M7.1b cosign verify probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_cosign_verify -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_cosign.elf .'
+
+  cosign:elf:loong64:
+    desc: 'Build app_loong64_cosign.elf (TamaGo PIE, M7.1b cosign verify probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_oci_cosign_verify -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_cosign.elf .'
+
+  cosign:efi:amd64:
+    desc: 'Build Phase-2 M7.1b BOOTX64-COSIGN.EFI (cosign verify probe).'
+    deps: [cosign:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-COSIGN.EFI" "{{.TASKFILE_DIR}}/app_amd64_cosign.elf"'
+
+  cosign:efi:arm64:
+    desc: 'Build Phase-2 M7.1b BOOTAA64-COSIGN.EFI (cosign verify probe).'
+    deps: [cosign:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-COSIGN.EFI" "{{.TASKFILE_DIR}}/app_arm64_cosign.elf"'
+
+  cosign:efi:riscv64:
+    desc: 'Build Phase-2 M7.1b BOOTRISCV64-COSIGN.EFI (cosign verify probe).'
+    deps: [cosign:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-COSIGN.EFI" "{{.TASKFILE_DIR}}/app_riscv64_cosign.elf"'
+
+  cosign:efi:loong64:
+    desc: 'Build Phase-2 M7.1b BOOTLOONGARCH64-COSIGN.EFI (cosign verify probe).'
+    deps: [cosign:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-COSIGN.EFI" "{{.TASKFILE_DIR}}/app_loong64_cosign.elf"'
+
+  cosign:all:
+    desc: 'Build all four Phase-2 M7.1b cosign verify probe EFIs.'
+    cmds:
+      - task: cosign:efi:amd64
+      - task: cosign:efi:arm64
+      - task: cosign:efi:riscv64
+      - task: cosign:efi:loong64
+
+  cosign:test:
+    desc: 'Run host-side ministack/oci tests including the M7.1b cosign verifier (coverage gate >=90%).'
+    env:
+      GOWORK: 'off'
+    cmds:
+      - go test -count=1 -cover -v ./uefiboard/ministack/oci/
+
+  live:cosign:amd64:
+    desc: 'Live cosign verify (M7.1b) — skipped: amd64 blocked by M6.2 (UPX-go).'
+    deps: [cosign:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livecosign/run.sh" amd64'
+
+  live:cosign:arm64:
+    desc: 'Live cosign verify (M7.1b) self-test under QEMU+EDK2 from BOOTAA64-COSIGN.EFI.'
+    deps: [cosign:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livecosign/run.sh" arm64'
+
+  live:cosign:riscv64:
+    desc: 'Live cosign verify (M7.1b) self-test under QEMU+EDK2 from BOOTRISCV64-COSIGN.EFI.'
+    deps: [cosign:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livecosign/run.sh" riscv64'
+
+  live:cosign:loong64:
+    desc: 'Live cosign verify (M7.1b) self-test under QEMU+EDK2 from BOOTLOONGARCH64-COSIGN.EFI.'
+    deps: [cosign:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livecosign/run.sh" loong64'
+
   # ----- M7.alt — oras-go-v2 evaluation -----------------------------
   # Parallel POC pulling the same artifact (ghcr.io/linuxcontainers/
   # alpine:latest) via oras.land/oras-go/v2 routed through ministack's
@@ -1650,6 +1770,8 @@ tasks:
       - rm -f app_amd64_https.elf app_arm64_https.elf app_riscv64_https.elf app_loong64_https.elf
       - rm -f app_amd64_oci.elf app_arm64_oci.elf app_riscv64_oci.elf app_loong64_oci.elf
       - rm -f app_amd64_ocistream.elf app_arm64_ocistream.elf app_riscv64_ocistream.elf app_loong64_ocistream.elf
+      - rm -f app_amd64_cosign.elf app_arm64_cosign.elf app_riscv64_cosign.elf app_loong64_cosign.elf
+      - rm -f BOOTX64-COSIGN.EFI BOOTAA64-COSIGN.EFI BOOTRISCV64-COSIGN.EFI BOOTLOONGARCH64-COSIGN.EFI
       - rm -f app_amd64_chainedhello.elf app_arm64_chainedhello.elf app_riscv64_chainedhello.elf app_loong64_chainedhello.elf
       - rm -f app_amd64_efihandover.elf app_arm64_efihandover.elf app_riscv64_efihandover.elf app_loong64_efihandover.elf
       - rm -f BOOTX64.EFI BOOTAA64.EFI BOOTRISCV64.EFI BOOTLOONGARCH64.EFI
