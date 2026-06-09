@@ -43,8 +43,17 @@ case "$ARCH" in
         EFI_NAME="BOOTX64-DHCP4.EFI"
         EFI_BOOT_NAME="BOOTX64.EFI"
         QEMU_BIN="qemu-system-x86_64"
-        FW_CODE_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-x86_64-code.fd"
-        FW_VARS_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-i386-vars.fd"
+        # Prefer the patched OVMF (edk2-stable202605, carries the three
+        # M6.2 amd64 #GP fixes — see docs/m6-2-edk2-upstream-investigation.md
+        # § "Patched OVMF integration"); fall back to pkgx-bundled buggy
+        # blob if the patched build is not installed on this host.
+        if [[ -f "$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-x86_64-code.fd" ]]; then
+            FW_CODE_DEFAULT="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-x86_64-code.fd"
+            FW_VARS_DEFAULT="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-i386-vars.fd"
+        else
+            FW_CODE_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-x86_64-code.fd"
+            FW_VARS_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-i386-vars.fd"
+        fi
         FW_CODE="${CLOUDBOOT_OVMF_AMD64_CODE:-$FW_CODE_DEFAULT}"
         FW_VARS="${CLOUDBOOT_OVMF_AMD64_VARS:-$FW_VARS_DEFAULT}"
         ;;

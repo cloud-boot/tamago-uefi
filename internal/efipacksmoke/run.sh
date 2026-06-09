@@ -25,8 +25,20 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EFIPACK_DIR="${EFIPACK_DIR:-$REPO_DIR/../../go-coff/efipack}"
 TIMEOUT="${EFIPACK_TIMEOUT:-90}"
 
-FW_CODE_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-x86_64-code.fd"
-FW_VARS_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-i386-vars.fd"
+# Prefer the patched OVMF (edk2-stable202605, carries the three M6.2
+# amd64 fixes — see cloud-boot/docs/m6-2-edk2-upstream-investigation.md
+# § "Patched OVMF integration"). Fall back to the pkgx-bundled buggy
+# blob only if the patched build is not installed, so this script keeps
+# running on hosts that haven't fetched it yet.
+FW_PATCHED_CODE="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-x86_64-code.fd"
+FW_PATCHED_VARS="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-i386-vars.fd"
+if [[ -f "$FW_PATCHED_CODE" && -f "$FW_PATCHED_VARS" ]]; then
+    FW_CODE_DEFAULT="$FW_PATCHED_CODE"
+    FW_VARS_DEFAULT="$FW_PATCHED_VARS"
+else
+    FW_CODE_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-x86_64-code.fd"
+    FW_VARS_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-i386-vars.fd"
+fi
 FW_CODE="${CLOUDBOOT_OVMF_AMD64_CODE:-$FW_CODE_DEFAULT}"
 FW_VARS="${CLOUDBOOT_OVMF_AMD64_VARS:-$FW_VARS_DEFAULT}"
 
