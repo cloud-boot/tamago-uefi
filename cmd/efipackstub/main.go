@@ -3,80 +3,46 @@
 //
 // efipackstub -- M6.2 PR2 self-extracting EFI stub (amd64).
 //
-// STATUS (2026-06-09, two sprints in): the stub builds, links, loads
-// under EDK2 OVMF q35, and main() runs to completion. Section-mapping
-// of `.payload` is still NOT working, AND the section-table-ordering
-// fix the previous sprint hypothesised was the cause is not sufficient
-// on its own. The packer (go-coff/efipack) was switched to insert
-// `.payload` BEFORE `.reloc` via peln/appender AppendBefore (clean
-// peln addition, 100 % cov), but the live amd64 smoke matrix still
-// shows the same fast-exit-to-shell behaviour for the packed HTTP
-// binary -- meaning `run()` is hitting one of the early
-// `return efiAborted` paths and gBS->Exit is returning control to the
-// firmware shell.
+// STATUS (2026-06-09, third sprint -- "option 2"): the previous two
+// sprints assumed firmware would map the `.payload` section into RAM
+// at its VirtualAddress. Two redesigns (the section-table-ordering
+// flip via peln/appender AppendBefore, then the "skip .reloc" theory)
+// both failed to produce a runnable packed binary -- on amd64 the
+// stub runs to main() but the bytes at ImageBase+payload.VA are zero,
+// so the CBP0 magic check fails and we exit via gBS->Exit with
+// EFI_ABORTED.
 //
-// Diagnosis re-assessment (post-sprint-2): a read of
-// MdePkg/Library/BasePeCoffLib/BasePeCoff.c::PeCoffLoaderLoadImage
-// shows the section-load loop iterates the FULL section table (line
-// 1391 `for (Index = 0; Index < NumberOfSections; Index++)`) and does
-// NOT short-circuit at the relocation directory. The "skips after
-// .reloc" theory was therefore wrong. The behavioural symptom (zero
-// bytes at ImageBase + .payload.VA) must have a different upstream
-// cause -- candidates yet to verify:
-//   a. The DxeCore (not BasePeCoffLib) layer applies a security /
-//      memory-attribute pass that zero-fills MEM_DISCARDABLE
-//      neighbouring data. .reloc has IMAGE_SCN_MEM_DISCARDABLE set;
-//      .payload sits next to it in the VA layout.
-//   b. SizeOfImage / SizeOfRawData truncation interacts with the
-//      InitializedData-only Characteristics flags we set.
-//   c. A separate runtime bug (e.g. unsafe.Slice over an address
-//      range firmware hasn't mapped) -- TamaGo PIE may treat
-//      `imageBytes[:size]` differently than expected.
+// "Option 2" sidesteps the in-RAM mapping question entirely:
 //
-// Live amd64 smoke results with AppendBefore-flip:
-//   - HTTP original  : PASS (regression-baseline intact)
-//   - HTTP packed    : FAIL (stub runs main, exits via gBS->Exit
-//                            with non-success status; child never
-//                            reaches HTTP-GET OK)
-//   - HTTPS / OCI / EFIHANDOVER not run -- gated on HTTP.
+//   1. HandleProtocol(EFI_LOADED_IMAGE_PROTOCOL) on our own image
+//      handle -> LoadedImage.DeviceHandle + LoadedImage.FilePath.
+//   2. HandleProtocol(EFI_SIMPLE_FILE_SYSTEM_PROTOCOL) on
+//      DeviceHandle -> sfs->OpenVolume(&root).
+//   3. Walk the FilePath DevicePath chain, accumulating FilePath
+//      (Media/0x04) UTF-16 components into a single path string
+//      (e.g. "\EFI\BOOT\BOOTX64.EFI").
+//   4. root->Open(path, EFI_FILE_MODE_READ, 0) -> EFI_FILE_PROTOCOL*
+//   5. file->GetInfo(EFI_FILE_INFO_GUID, &size, &info) to read the size.
+//   6. AllocatePool(size) -> buffer.
+//   7. file->Read(&size, buffer) to slurp the whole file into RAM.
+//   8. Close file + close root.
+//   9. Parse the buffer as a PE32+, find `.payload` at its on-disk
+//      offset (PointerToRawData), validate CBP0, decompress, chain
+//      via gBS->LoadImage + gBS->StartImage.
 //
-// Three follow-up options remain valid; option 2 (re-read file via
-// SimpleFileSystem) is now the recommended next move because it
-// sidesteps both the EDK2 mapping question AND any
-// MEM_DISCARDABLE-neighbour zeroing:
+// Because step 7 reads from disk (the SimpleFileSystem layer
+// understands the FAT filesystem on the ESP), we recover the FULL
+// on-disk PE bytes -- including the `.payload` section body that the
+// firmware refused to map.
 //
-//   1. AppendBefore is LANDED in peln + efipack regardless -- it is
-//      a structurally cleaner shape and useful for future packers
-//      that need to interleave headers around the relocation
-//      directory. Test coverage = 100 %.
-//   2. Re-read the stub's own file via
-//      LOADED_IMAGE_PROTOCOL.DeviceHandle +
-//      SimpleFileSystemProtocol -> Open -> Read on the FilePath.
-//      Robust against any in-memory section-mapping quirk.
-//   3. Inline the compressed payload bytes inside the stub's
-//      `.rodata` via a sentinel slot the packer overwrites
-//      post-link. Wastes the maximum-payload-size's worth of
-//      bytes in every stub.
-//
-// Lifecycle once the section-mapping issue is fixed:
-//
-//  1. UEFI firmware enters cpuinit_amd64.s with (ImageHandle,
-//     EFI_SYSTEM_TABLE*); the per-arch cpuinit shim captures those
-//     into uefiboard.imageHandle / uefiboard.systemTable.
-//  2. runtime.rt0 brings the Go runtime up and calls main().
-//  3. main() invokes run(), which:
-//       a. HandleProtocol(LOADED_IMAGE_PROTOCOL) -> ImageBase/Size.
-//       b. Walks the PE section table to find `.payload`.
-//       c. Parses the 24-byte CBP0 wire header.
-//       d. Decompresses via compress/flate.
-//       e. gBS->AllocatePages a buffer of EfiLoaderCode pages.
-//       f. gBS->LoadImage(source = decompressed buffer).
-//       g. gBS->StartImage on the child handle.
-//  4. Whatever EFI_STATUS the child returned is forwarded to
-//     gBS->Exit so the parent (e.g. the EDK shell, or
-//     phase2-efi-handover's StartImage) sees the same status it
-//     would have seen if it had loaded the original (unpacked)
-//     payload directly.
+// What's PRESERVED from the previous sprint:
+//   - peln/appender.AppendBefore is LANDED upstream regardless --
+//     structurally cleaner shape for any packer that needs to
+//     interleave headers around the relocation directory.
+//   - The stub's runtime shape mirrors cmd/chainedtinyC: no println,
+//     no goos.Exit linkname hook (the M6.2 de-risk sweep showed those
+//     two behaviours trigger the EDK2 OVMF CpuPageTableLib #GP at
+//     CpuDxe.dll+0x110C during a parent's StartImage call).
 //
 // Build (TamaGo PIE, amd64):
 //
@@ -85,18 +51,9 @@
 //	    -trimpath -buildmode=pie -ldflags "-E cpuinit" \
 //	    -o app_amd64_efipackstub.elf ./cmd/efipackstub
 //
-// Then linked via pectl link-pie into a PE32+/EFI; the resulting
-// PE bytes are what efipack embeds (stub/blobs/amd64.efi.bin) and
-// uses as the envelope base PE when packing an input image.
-//
-// CRITICAL: this stub deliberately mirrors cmd/chainedtinyC's
-// runtime shape (no println, no goos.Exit linkname hook). The M6.2
-// de-risk sweep on 2026-06-09 found that TamaGo PIEs which install
-// the goosExit linkname closure OR print via ConOut before
-// chain-booting trigger the EDK2 OVMF CpuPageTableLib #GP at
-// CpuDxe.dll +0x110C during a parent's StartImage call -- while a
-// structurally identical TamaGo PIE without those two runtime
-// behaviours passes. We avoid both here.
+// Then linked via pectl link-pie into a PE32+/EFI; the resulting PE
+// bytes are what efipack embeds (stub/blobs/amd64.efi.bin) and uses
+// as the envelope base PE when packing an input image.
 package main
 
 import (
@@ -121,8 +78,31 @@ var loadedImageGUID = uefiboard.EFIGUID{
 	Data4: [8]uint8{0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b},
 }
 
-// EFI_LOADED_IMAGE_PROTOCOL field offsets on 64-bit UEFI (MdePkg /
-// LoadedImage.h with natural 8-byte alignment for pointers/UINT64):
+// EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID
+//
+//	964e5b22-6459-11d2-8e39-00a0c969723b
+//
+// Source: MdePkg/Include/Protocol/SimpleFileSystem.h (edk2.git).
+var simpleFSGUID = uefiboard.EFIGUID{
+	Data1: 0x964e5b22,
+	Data2: 0x6459,
+	Data3: 0x11d2,
+	Data4: [8]uint8{0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b},
+}
+
+// EFI_FILE_INFO_GUID
+//
+//	09576e92-6d3f-11d2-8e39-00a0c969723b
+//
+// Source: MdePkg/Include/Guid/FileInfo.h (edk2.git).
+var fileInfoGUID = uefiboard.EFIGUID{
+	Data1: 0x09576e92,
+	Data2: 0x6d3f,
+	Data3: 0x11d2,
+	Data4: [8]uint8{0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b},
+}
+
+// EFI_LOADED_IMAGE_PROTOCOL field offsets on 64-bit UEFI:
 //
 //	0  UINT32                    Revision
 //	8  EFI_HANDLE                ParentHandle
@@ -134,13 +114,71 @@ var loadedImageGUID = uefiboard.EFIGUID{
 //	56 VOID                      *LoadOptions
 //	64 VOID                      *ImageBase
 //	72 UINT64                    ImageSize
-//	80 EFI_MEMORY_TYPE           ImageCodeType
-//	84 EFI_MEMORY_TYPE           ImageDataType
-//	88 EFI_IMAGE_UNLOAD          Unload
 const (
-	liImageBase = 64
-	liImageSize = 72
+	liDeviceHandle = 24
+	liFilePath     = 32
 )
+
+// EFI_SIMPLE_FILE_SYSTEM_PROTOCOL function-pointer offsets:
+//
+//	0  UINT64  Revision
+//	8  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_OPEN_VOLUME OpenVolume
+const sfsOpenVolume = 8
+
+// EFI_FILE_PROTOCOL function-pointer offsets (UEFI 2.10 §13.5):
+//
+//	0   UINT64  Revision
+//	8   Open
+//	16  Close
+//	24  Delete
+//	32  Read
+//	40  Write
+//	48  GetPosition
+//	56  SetPosition
+//	64  GetInfo
+//	72  SetInfo
+//	80  Flush
+const (
+	fileOpen    = 8
+	fileClose   = 16
+	fileRead    = 32
+	fileGetInfo = 64
+)
+
+// EFI_FILE_MODE_READ (UEFI 2.10 §13.5).
+const efiFileModeRead uint64 = 0x0000000000000001
+
+// EFI_DEVICE_PATH_PROTOCOL node header:
+//
+//	0  UINT8   Type
+//	1  UINT8   SubType
+//	2  UINT16  Length (total node length including header)
+//
+// Media type = 0x04, FilePath subtype = 0x04 -- the only node kind we
+// extract path components from. Path16[] (UTF-16 LE, NUL-terminated)
+// fills bytes 4..Length.
+//
+// End-of-Hardware node: Type 0x7F, SubType 0xFF (or 0x01 for end-of-
+// instance which we treat the same way).
+const (
+	dpTypeMedia       = 0x04
+	dpSubTypeFilePath = 0x04
+	dpTypeEnd         = 0x7F
+)
+
+// EFI_FILE_INFO header (UEFI 2.10 §13.5.16): the dynamic FileName
+// field starts at offset 80. We only care about FileSize at offset 8
+// for the buffer-sizing pass.
+//
+//	0   UINT64  Size           // total size of this struct incl. FileName
+//	8   UINT64  FileSize
+//	16  UINT64  PhysicalSize
+//	24  EFI_TIME CreateTime    // 16 bytes
+//	40  EFI_TIME LastAccessTime
+//	56  EFI_TIME ModificationTime
+//	72  UINT64  Attribute
+//	80  CHAR16  FileName[]
+const fileInfoFileSize = 8
 
 // Wire-format constants mirrored from go-coff/efipack:
 //
@@ -165,6 +203,9 @@ const (
 // EFI_ABORTED on a 64-bit UEFI.
 const efiAborted uintptr = 0x8000000000000015
 
+// efiSuccess in the raw uint64 status space.
+const efiSuccess uint64 = 0
+
 // main is the stub entry from the firmware's perspective (via
 // cpuinit_amd64.s -> runtime.rt0 -> main). We deliberately avoid
 // println, fmt, and any goos.Exit linkname hook -- see the package
@@ -178,15 +219,14 @@ func main() {
 
 // run does the actual work, returning an EFI_STATUS to pass to
 // gBS->Exit. EFI_SUCCESS (0) for the happy path; EFI_ABORTED for any
-// internal failure (the parent firmware logs it but doesn't loop).
+// internal failure.
 func run() uintptr {
-	base, size, ok := loadedImageBaseSize()
+	peBytes, ok := readOwnFile()
 	if !ok {
 		return efiAborted
 	}
-	imageBytes := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(base))), int(size))
 
-	payload, ok := findPayloadSection(imageBytes)
+	payload, ok := findPayloadOnDisk(peBytes)
 	if !ok {
 		return efiAborted
 	}
@@ -228,40 +268,216 @@ func run() uintptr {
 	return st
 }
 
-// loadedImageBaseSize calls gBS->HandleProtocol on our own image
-// handle to retrieve EFI_LOADED_IMAGE_PROTOCOL, then reads ImageBase
-// and ImageSize. Returns ok=false if either lookup fails.
-func loadedImageBaseSize() (base uint64, size uint64, ok bool) {
-	iface, err := uefiboard.HandleProtocol(myImageHandleU64(), &loadedImageGUID)
-	if err != nil || iface == 0 {
-		return 0, 0, false
+// readOwnFile re-reads our own EFI file off the boot volume via the
+// EFI_LOADED_IMAGE_PROTOCOL.DeviceHandle + EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
+// pair. Returns the full on-disk PE bytes.
+//
+// This is the heart of "option 2": rather than trust whatever
+// in-memory layout the firmware chose for us, we re-fetch our own
+// file from disk so the `.payload` section is recoverable at its
+// PointerToRawData offset regardless of what the in-RAM section
+// mapping looks like.
+func readOwnFile() ([]byte, bool) {
+	// Step 1: LOADED_IMAGE_PROTOCOL on our own image handle.
+	li, err := uefiboard.HandleProtocol(myImageHandleU64(), &loadedImageGUID)
+	if err != nil || li == 0 {
+		return nil, false
 	}
-	basePtr := *(*uint64)(unsafe.Pointer(uintptr(iface) + liImageBase))
-	szU64 := *(*uint64)(unsafe.Pointer(uintptr(iface) + liImageSize))
-	if basePtr == 0 || szU64 == 0 {
-		return 0, 0, false
+	devHandle := *(*uint64)(unsafe.Pointer(uintptr(li) + liDeviceHandle))
+	filePathPtr := *(*uint64)(unsafe.Pointer(uintptr(li) + liFilePath))
+	if devHandle == 0 || filePathPtr == 0 {
+		return nil, false
 	}
-	return basePtr, szU64, true
+
+	// Step 2: SimpleFileSystem on the DeviceHandle, then OpenVolume.
+	sfs, err := uefiboard.HandleProtocol(devHandle, &simpleFSGUID)
+	if err != nil || sfs == 0 {
+		return nil, false
+	}
+	var root uint64
+	status := uefiboard.EFICall(
+		sfs+sfsOpenVolume,
+		sfs,
+		uint64(uintptr(unsafe.Pointer(&root))),
+		0, 0, 0, 0,
+	)
+	if status != efiSuccess || root == 0 {
+		return nil, false
+	}
+
+	// Step 3: walk the DevicePath chain in LoadedImage.FilePath,
+	// gathering File-Path nodes into a UTF-16 path.
+	path16 := buildPath16(filePathPtr)
+	if len(path16) == 0 {
+		closeFile(root)
+		return nil, false
+	}
+
+	// Step 4: root->Open(path).
+	var file uint64
+	status = uefiboard.EFICall(
+		root+fileOpen,
+		root,
+		uint64(uintptr(unsafe.Pointer(&file))),
+		uint64(uintptr(unsafe.Pointer(&path16[0]))),
+		efiFileModeRead,
+		0,
+		0,
+	)
+	if status != efiSuccess || file == 0 {
+		closeFile(root)
+		return nil, false
+	}
+
+	// Step 5: file->GetInfo(EFI_FILE_INFO_GUID).
+	size, ok := getFileSize(file)
+	if !ok || size == 0 {
+		closeFile(file)
+		closeFile(root)
+		return nil, false
+	}
+
+	// Step 6: allocate buffer (Go-allocated slice; the firmware
+	// only needs a pointer + size for Read).
+	buf := make([]byte, size)
+
+	// Step 7: file->Read(&size, buf).
+	readSize := uintptr(size)
+	status = uefiboard.EFICall(
+		file+fileRead,
+		file,
+		uint64(uintptr(unsafe.Pointer(&readSize))),
+		uint64(uintptr(unsafe.Pointer(&buf[0]))),
+		0, 0, 0,
+	)
+	closeFile(file)
+	closeFile(root)
+	if status != efiSuccess {
+		return nil, false
+	}
+	if uint64(readSize) != size {
+		// Short read; refuse to proceed with a truncated PE.
+		return nil, false
+	}
+	return buf, true
 }
 
-// myImageHandle returns our PE image handle as a uintptr. cpuinit
-// captured it from RCX at entry; uefiboard's imageHandle slot is
-// the canonical view -- we go-linkname through it for the
-// HandleProtocol + Exit calls.
+// closeFile invokes the EFI_FILE_PROTOCOL.Close slot. Errors are
+// ignored -- there is nothing useful we can do with them at this
+// point in the stub's lifetime.
+func closeFile(file uint64) {
+	if file == 0 {
+		return
+	}
+	_ = uefiboard.EFICall(
+		file+fileClose,
+		file,
+		0, 0, 0, 0, 0,
+	)
+}
+
+// getFileSize calls file->GetInfo(EFI_FILE_INFO_GUID, ...) twice: once
+// with size=0 to get the required buffer size, then once with the
+// real buffer. Returns the FileSize field at offset 8 of the returned
+// struct.
+func getFileSize(file uint64) (uint64, bool) {
+	// First call: probe required buffer size.
+	var bufSize uintptr
+	status := uefiboard.EFICall(
+		file+fileGetInfo,
+		file,
+		uint64(uintptr(unsafe.Pointer(&fileInfoGUID))),
+		uint64(uintptr(unsafe.Pointer(&bufSize))),
+		0, // Buffer = NULL
+		0, 0,
+	)
+	// Expected: EFI_BUFFER_TOO_SMALL = 0x8000000000000005. bufSize is
+	// now the required size. Anything else (including success on a
+	// firmware that pre-fills a small buffer for us) we also handle
+	// by falling through.
+	if bufSize == 0 {
+		return 0, false
+	}
+	buf := make([]byte, bufSize)
+	status = uefiboard.EFICall(
+		file+fileGetInfo,
+		file,
+		uint64(uintptr(unsafe.Pointer(&fileInfoGUID))),
+		uint64(uintptr(unsafe.Pointer(&bufSize))),
+		uint64(uintptr(unsafe.Pointer(&buf[0]))),
+		0, 0,
+	)
+	if status != efiSuccess {
+		return 0, false
+	}
+	if uintptr(len(buf)) < fileInfoFileSize+8 {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint64(buf[fileInfoFileSize : fileInfoFileSize+8]), true
+}
+
+// buildPath16 walks the EFI_DEVICE_PATH_PROTOCOL chain starting at
+// dp, concatenating every Media/FilePath (0x04/0x04) node's Path16
+// content into a single NUL-terminated UTF-16 path suitable for
+// passing to EFI_FILE_PROTOCOL.Open.
 //
-//go:linkname stubImageHandle github.com/cloud-boot/tamago-uefi/uefiboard.imageHandle
-var stubImageHandle uint64
+// Components from each FilePath node are concatenated as-is. UEFI
+// FilePath nodes for individual path components typically already
+// include the leading backslash separator (e.g. "\EFI", then
+// "\BOOT", then "\BOOTX64.EFI"). For the common case where the
+// firmware packs the whole "\EFI\BOOT\BOOTX64.EFI" string into a
+// single FilePath node, this also Just Works.
+//
+// Returns nil if no FilePath nodes were found. Defensively caps the
+// walk at a sane node count to avoid wandering off into firmware
+// memory if a malformed chain is presented.
+func buildPath16(dp uint64) []uint16 {
+	if dp == 0 {
+		return nil
+	}
+	const maxNodes = 32
+	const maxNodeLen = 4096
+	var out []uint16
+	cur := uintptr(dp)
+	for i := 0; i < maxNodes; i++ {
+		t := *(*uint8)(unsafe.Pointer(cur))
+		st := *(*uint8)(unsafe.Pointer(cur + 1))
+		ln := *(*uint16)(unsafe.Pointer(cur + 2))
+		if ln < 4 || ln > maxNodeLen {
+			break
+		}
+		if t == dpTypeEnd {
+			break
+		}
+		if t == dpTypeMedia && st == dpSubTypeFilePath {
+			// UTF-16 path data starts at offset 4, runs to ln.
+			n16 := (uintptr(ln) - 4) / 2
+			if n16 > 0 {
+				src := unsafe.Slice((*uint16)(unsafe.Pointer(cur+4)), int(n16))
+				// Trim a trailing NUL on this node so the joined
+				// result has exactly one terminator at the end.
+				if src[len(src)-1] == 0 {
+					src = src[:len(src)-1]
+				}
+				out = append(out, src...)
+			}
+		}
+		cur += uintptr(ln)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	// NUL-terminate.
+	out = append(out, 0)
+	return out
+}
 
-func myImageHandle() uintptr   { return uintptr(stubImageHandle) }
-func myImageHandleU64() uint64 { return stubImageHandle }
-
-// findPayloadSection walks the PE section table inside pe[] and
-// returns the body of the section named ".payload". Tries the
-// VirtualAddress view first (firmware-loaded mapping), then the
-// PointerToRawData view as a fallback. Validates each candidate
-// against the CBP0 magic so a wrong view yields a clean "not
-// found" rather than a corrupt body.
-func findPayloadSection(pe []byte) ([]byte, bool) {
+// findPayloadOnDisk walks the section table of the PE bytes (read
+// from disk) and returns the `.payload` section body using its
+// PointerToRawData / SizeOfRawData fields -- not the in-memory
+// VirtualAddress view. Validates the CBP0 magic at the head of the
+// candidate region.
+func findPayloadOnDisk(pe []byte) ([]byte, bool) {
 	if len(pe) < 0x40 || pe[0] != 'M' || pe[1] != 'Z' {
 		return nil, false
 	}
@@ -287,31 +503,19 @@ func findPayloadSection(pe []byte) ([]byte, bool) {
 		if name != target {
 			continue
 		}
-		vsize := binary.LittleEndian.Uint32(pe[off+8:])
 		rsize := binary.LittleEndian.Uint32(pe[off+16:])
 		foff := binary.LittleEndian.Uint32(pe[off+20:])
-		va := binary.LittleEndian.Uint32(pe[off+12:])
-		size := vsize
-		if size > rsize {
-			size = rsize
+		if rsize == 0 {
+			return nil, false
 		}
-		if uint64(va)+uint64(size) <= uint64(len(pe)) {
-			if hasPayloadMagic(pe[va:]) {
-				return pe[va : va+size], true
-			}
+		if uint64(foff)+uint64(rsize) > uint64(len(pe)) {
+			return nil, false
 		}
-		if uint64(foff)+uint64(size) <= uint64(len(pe)) {
-			if hasPayloadMagic(pe[foff:]) {
-				return pe[foff : foff+size], true
-			}
+		body := pe[foff : foff+rsize]
+		if !hasPayloadMagic(body) {
+			return nil, false
 		}
-		if uint64(va)+uint64(size) <= uint64(len(pe)) {
-			return pe[va : va+size], true
-		}
-		if uint64(foff)+uint64(size) <= uint64(len(pe)) {
-			return pe[foff : foff+size], true
-		}
-		return nil, false
+		return body, true
 	}
 	return nil, false
 }
@@ -333,6 +537,17 @@ func trimNUL(b []byte) string {
 	}
 	return string(b)
 }
+
+// myImageHandle returns our PE image handle as a uintptr. cpuinit
+// captured it from RCX at entry; uefiboard's imageHandle slot is
+// the canonical view -- we go-linkname through it for the
+// HandleProtocol + Exit calls.
+//
+//go:linkname stubImageHandle github.com/cloud-boot/tamago-uefi/uefiboard.imageHandle
+var stubImageHandle uint64
+
+func myImageHandle() uintptr   { return uintptr(stubImageHandle) }
+func myImageHandleU64() uint64 { return stubImageHandle }
 
 // flateDecode decompresses src (raw flate stream) into dst,
 // returning true iff exactly len(dst) bytes were produced.
