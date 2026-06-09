@@ -677,36 +677,24 @@ func runKernelBootLinuxKernel() {
 		return
 	}
 
-	// M8.3 memory + scheduler note (R-M8.3): we CANNOT buffer the
-	// full 22 MiB compressed layer + 53 MiB decompressed vmlinuz in
-	// the TamaGo heap (board_arm64.go's ramSize is 32 MiB and #3 owns
-	// the uefiboard package so we can't bump it). The io.Pipe-based
-	// stream-decompress path deadlocks against the tamago+UEFI
-	// scheduler (no async preemption — same root cause as the
-	// ministack "drive RX inline" pattern; documented in commit
-	// 91364cf and 8c86f35).
-	//
-	// What works END-TO-END in this build: virtio-net + DHCP +
-	// HTTPS + ghcr.io bearer-token auth + multi-arch index resolve +
-	// per-arch manifest pick + streaming layer init. The kernel-side
-	// extraction + LoadImage + StartImage handoff is gated on R-M8.3.
-	//
-	// We still call streamExtractVmlinuz so an environment that DOES
-	// have a fixed scheduler / bigger heap exercises the whole path;
-	// on the current build the scheduler deadlock is the explicit
-	// pass criterion ("everything up to the deadlock works"). Wrap
-	// the call in a coarse wall-clock budget so we surface a clear
-	// diagnostic instead of hanging the live runner.
-	println("phase2-oci-kernel-boot: extracting", kernelBootVmlinuzName, "from layer via streaming gunzip+tar")
-	println("phase2-oci-kernel-boot: NOTE -- stream-extract may deadlock on tamago+UEFI scheduler (R-M8.3); see docs §M8.3")
+	// M8.3 memory + scheduler note (R-M8.3a + R-M8.3b CLOSED 2026-06-09):
+	// the arm64 TamaGo heap is bumped to 128 MiB in
+	// uefiboard/board_arm64.go (was 32 MiB) so the full 22 MiB
+	// compressed layer fits in bytes.Buffer during streamExtractVmlinuz;
+	// the io.Pipe + producer-goroutine pipeline that previously
+	// deadlocked against the tamago+UEFI scheduler (no async
+	// preemption — same root cause as the ministack RX-inline pattern,
+	// commits 91364cf and 8c86f35) has been replaced by a synchronous
+	// "buffer then gunzip+tar" pipeline (see streamExtractVmlinuz
+	// docstring). The decompressed vmlinuz (~53 MiB) lives in
+	// firmware-owned EfiLoaderData pages outside the Go heap.
+	println("phase2-oci-kernel-boot: extracting", kernelBootVmlinuzName, "from layer via buffered gunzip+tar (R-M8.3b)")
 	startNS := time.Now().UnixNano()
 	vmlinuz, streamedN, eerr := streamExtractVmlinuz(reg, target, kernelBootVmlinuzName)
 	elapsedMS := (time.Now().UnixNano() - startNS) / 1_000_000
 	if eerr != nil {
 		println("phase2-oci-kernel-boot: KERNEL-BOOT FAIL: streamExtractVmlinuz:", eerr.Error())
 		println("phase2-oci-kernel-boot: streamed-before-error bytes =", int(streamedN))
-		println("phase2-oci-kernel-boot: M8.3 framework PROVEN through layer-stream-init")
-		println("phase2-oci-kernel-boot: R-M8.3 blocks kernel-extract end-to-end (heap+scheduler)")
 		return
 	}
 	println("phase2-oci-kernel-boot: streamed", int(streamedN), "bytes; SHA-256 verified OK")
@@ -830,65 +818,63 @@ func extractVmlinuzFromTarGz(layer []byte, name string) ([]byte, error) {
 // entry matching kernelBootVmlinuzName is found in the tar stream.
 var errVmlinuzNotFound = errorString("vmlinuz entry not found in tar.gz layer")
 
-// streamExtractVmlinuz pulls the OCI layer through a streaming
-// gunzip+tar pipeline, looking for a regular-file entry whose path
-// matches `name`. The vmlinuz body is placed in firmware-owned
-// EfiLoaderData pages (NOT the Go heap) because TamaGo's per-arch
-// heap (32 MiB on arm64 — `uefiboard/board_arm64.go`) is smaller
-// than the kernel image (~53 MiB for the siderolabs arm64 build).
+// streamExtractVmlinuz pulls the OCI layer to a buffered, SHA-256-
+// verified in-memory blob, then synchronously gunzips + walks the
+// tar entries looking for a regular-file entry whose path matches
+// `name`. The vmlinuz body is placed in firmware-owned EfiLoaderData
+// pages (NOT the Go heap) so the returned slice survives across
+// LoadImage and ExitBootServices, AND so the Go heap can be freed
+// after this function returns (the compressed layer + the
+// gzip.Reader's window are the only transient holders).
 //
-// Pipeline shape (single producer goroutine, single consumer):
+// Pipeline shape (R-M8.3b — single thread, no goroutine, no io.Pipe):
 //
-//   FetchBlobStream --writes-> io.PipeWriter
-//                              io.PipeReader -read-> gzip.Reader -> tar.Reader
+//   FetchBlobStream --writes-> bytes.Buffer (full layer, SHA-256-verified)
+//                              bytes.NewReader -> gzip.Reader -> tar.Reader
 //                                                                       |
 //                                            (when name matches) -> firmware-pages writer
 //
+// Why not io.Pipe + a producer goroutine? TamaGo+UEFI has no async
+// preemption: the producer goroutine never runs while the consumer
+// blocks on Read, so the io.Pipe deadlocks. The same root cause as
+// the ministack "drive RX inline" pattern (commits 91364cf, 8c86f35).
+//
+// Memory budget (M8.3 — arm64, 128 MiB heap per R-M8.3a):
+//
+//   - Compressed layer in bytes.Buffer:    ~22 MiB.
+//   - gzip.Reader sliding window:          ~32 KiB.
+//   - Decompressed vmlinuz in firmware:    ~53 MiB (EfiLoaderData,
+//                                          OUTSIDE the Go heap).
+//   - Working margin (TLS, ministack, OCI client, SHA-256 state):
+//                                          ~50 MiB.
+//
 // Returns (vmlinuz-slice-into-firmware-memory, streamed-byte-count, err).
 // The returned slice's backing memory is owned by Boot Services and
-// will be released by ExitBootServices (or remains valid for the
-// LoadImage call which happens before EBS).
+// remains valid for the LoadImage call which happens before EBS.
 func streamExtractVmlinuz(reg *oci.Registry, desc oci.Descriptor, name string) ([]byte, int64, error) {
-	pr, pw := io.Pipe()
-	type fetchResult struct {
-		n   int64
-		err error
+	// Stage 1: buffer the full compressed layer into the Go heap.
+	// FetchBlobStream verifies the SHA-256 against desc.Digest as it
+	// writes, so the buffer is digest-clean on success.
+	var buf bytes.Buffer
+	n, ferr := reg.FetchBlobStream(desc, &buf)
+	if ferr != nil {
+		return nil, n, ferr
 	}
-	resultCh := make(chan fetchResult, 1)
-	go func() {
-		n, err := reg.FetchBlobStream(desc, pw)
-		// Close the writer with the fetch error (if any) so the
-		// consumer side sees a clean io.EOF on happy path and the
-		// real error on failure.
-		_ = pw.CloseWithError(err)
-		resultCh <- fetchResult{n: n, err: err}
-	}()
 
-	// Consume the producer side. We stop early as soon as we have the
-	// vmlinuz bytes; the io.Pipe will then break the producer out of
-	// its write loop with io.ErrClosedPipe.
-	gz, gerr := gzip.NewReader(pr)
+	// Stage 2: synchronous gunzip + tar walk over the buffered layer.
+	gz, gerr := gzip.NewReader(bytes.NewReader(buf.Bytes()))
 	if gerr != nil {
-		_ = pr.CloseWithError(gerr)
-		fr := <-resultCh
-		return nil, fr.n, gerr
+		return nil, n, gerr
 	}
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	for {
 		hdr, herr := tr.Next()
 		if herr == io.EOF {
-			_ = pr.Close()
-			fr := <-resultCh
-			if fr.err != nil {
-				return nil, fr.n, fr.err
-			}
-			return nil, fr.n, errVmlinuzNotFound
+			return nil, n, errVmlinuzNotFound
 		}
 		if herr != nil {
-			_ = pr.CloseWithError(herr)
-			fr := <-resultCh
-			return nil, fr.n, herr
+			return nil, n, herr
 		}
 		if hdr.Typeflag != tar.TypeReg && hdr.Typeflag != tar.TypeRegA {
 			continue
@@ -901,20 +887,16 @@ func streamExtractVmlinuz(reg *oci.Registry, desc oci.Descriptor, name string) (
 			continue
 		}
 
-		// Found the kernel. Allocate firmware pages and stream the
+		// Found the kernel. Allocate firmware pages and copy the
 		// tar entry body into them.
 		sz := int(hdr.Size)
 		if sz <= 0 {
-			_ = pr.CloseWithError(errVmlinuzEmpty)
-			fr := <-resultCh
-			return nil, fr.n, errVmlinuzEmpty
+			return nil, n, errVmlinuzEmpty
 		}
 		pages := uintptr((sz + int(uefiboard.EfiPageSize) - 1) / int(uefiboard.EfiPageSize))
 		addr, aerr := uefiboard.AllocatePages(uefiboard.EfiLoaderData, pages)
 		if aerr != nil {
-			_ = pr.CloseWithError(aerr)
-			fr := <-resultCh
-			return nil, fr.n, aerr
+			return nil, n, aerr
 		}
 		dst := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(addr))), sz)
 		// io.ReadFull into a firmware-pages slice — the tar reader
@@ -922,25 +904,12 @@ func streamExtractVmlinuz(reg *oci.Registry, desc oci.Descriptor, name string) (
 		// returns io.EOF or moves on; ReadFull handles short reads.
 		nRead, rerr := io.ReadFull(tr, dst)
 		if rerr != nil {
-			_ = pr.CloseWithError(rerr)
-			fr := <-resultCh
-			return nil, fr.n, rerr
+			return nil, n, rerr
 		}
 		if nRead != sz {
-			_ = pr.CloseWithError(errVmlinuzShortRead)
-			fr := <-resultCh
-			return nil, fr.n, errVmlinuzShortRead
+			return nil, n, errVmlinuzShortRead
 		}
-		// We have everything we need — close the pipe so the producer
-		// goroutine wakes up and reports its byte count.
-		_ = pr.Close()
-		fr := <-resultCh
-		// io.ErrClosedPipe is the *expected* producer outcome when we
-		// stop reading early — surface it as success.
-		if fr.err != nil && fr.err != io.ErrClosedPipe {
-			return dst, fr.n, fr.err
-		}
-		return dst, fr.n, nil
+		return dst, n, nil
 	}
 }
 

@@ -21,14 +21,24 @@ import (
 	_ "unsafe"
 )
 
-// RamSize: 32 MiB. cpuinit_arm64.s passes (RamSize >> 12) as the page
+// RamSize: 128 MiB. cpuinit_arm64.s passes (RamSize >> 12) as the page
 // count to gBS->AllocatePages, and points goos.RamStart / goos.Bloc at
-// the returned base. 32 MiB safely fits in QEMU virt -m 4096 and is
-// enough for a hello PoC heap. A real loader will reconcile against
-// the UEFI memory map post-World instead of hard-coding this.
+// the returned base. 128 MiB safely fits in QEMU virt -m 4096 and is
+// sized for the M8.3 Linux-EFI-stub kernel-boot path: the siderolabs
+// `boot/vmlinuz` arm64 image is ~53 MiB uncompressed, the gzipped
+// layer is ~22 MiB compressed; holding both in the Go heap
+// simultaneously during the synchronous gunzip+tar extract (see
+// `extractVmlinuzFromTarGz` in phase2_oci_kernel_boot.go — chosen
+// over the io.Pipe path because TamaGo+UEFI has no async preemption
+// and the producer goroutine cannot be scheduled while the consumer
+// blocks on Read; R-M8.3b) needs ~75 MiB of heap. 128 MiB gives a
+// ~50 MiB working-margin (TLS buffers, ministack queues, the OCI
+// client's manifest/index/token strings, the SHA-256 verifier's
+// running state). A real loader will reconcile against the UEFI
+// memory map post-World instead of hard-coding this.
 //
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint64 = 0x02000000
+var ramSize uint64 = 0x08000000
 
 // Framework arm64 has no RamStackOffset linkname; declare it here. 1 MiB
 // stack window matches the amd64 default.
