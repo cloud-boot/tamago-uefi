@@ -58,8 +58,18 @@ func runEFIHandoverProbe() {
 	println("phase2-efi-handover: M8.0 -- gBS->LoadImage + StartImage chain-boot mechanism")
 	println("phase2-efi-handover: arch =", runtime.GOARCH)
 
-	payload := embed_chained.ChainedEFI
-	println("phase2-efi-handover: embed length =", len(payload))
+	// The chained payload ships gzipped in the parent binary so the
+	// amd64 PE32+ stays below the M6.1 EDK2 OVMF CpuPageTableLib
+	// threshold (~3.17 MiB band; see cloud-boot/docs §5 M6.1). Pay
+	// the inflate cost here at probe time rather than at package
+	// init so non-M8.0 builds get nothing.
+	payload, err := embed_chained.Decompress()
+	if err != nil {
+		println("phase2-efi-handover: embed Decompress FAILED:", err.Error())
+		println("phase2-efi-handover: HANDOVER FAIL:", err.Error())
+		return
+	}
+	println("phase2-efi-handover: embed length (decompressed) =", len(payload))
 	if len(payload) == 0 {
 		println("phase2-efi-handover: HANDOVER FAIL: embedded chained payload is empty")
 		return

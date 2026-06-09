@@ -1239,42 +1239,49 @@ tasks:
       - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}} -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_chainedhello.elf ./cmd/chainedhello'
 
   # chainedhello:efi:<arch> — links the chained PIE ELF into a
-  # PE32+/EFI and ALSO copies it into the embed_chained package's
-  # per-arch slot (chained_<arch>.efi) so the next parent build
-  # picks it up via //go:embed.
+  # PE32+/EFI and ALSO stages it gzipped into the embed_chained
+  # package's per-arch slot (chained_<arch>.efi.gz) so the next
+  # parent build picks it up via //go:embed.
+  #
+  # The .efi.gz embed (M6.1 mitigation): gzipping the chained
+  # payload before embed shrinks the parent PE32+ by ~1 MiB on
+  # amd64 and brings it under the EDK2 OVMF CpuPageTableLib
+  # threshold (~3.17 MiB band). `gzip -9 -n -c` is max compression
+  # with reproducible output (no filename or mtime in the header).
+  # The probe calls embed_chained.Decompress() to inflate on use.
   chainedhello:efi:amd64:
-    desc: 'Build M8.0 BOOTX64-CHAINED.EFI and stage as embed_chained/chained_amd64.efi.'
+    desc: 'Build M8.0 BOOTX64-CHAINED.EFI and stage gzipped as embed_chained/chained_amd64.efi.gz.'
     deps: [chainedhello:elf:amd64]
     cmds:
       - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-CHAINED.EFI" "{{.TASKFILE_DIR}}/app_amd64_chainedhello.elf"'
-      - 'cp "{{.TASKFILE_DIR}}/BOOTX64-CHAINED.EFI" "{{.TASKFILE_DIR}}/internal/embed_chained/chained_amd64.efi"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTX64-CHAINED.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained/chained_amd64.efi.gz"'
 
   chainedhello:efi:arm64:
-    desc: 'Build M8.0 BOOTAA64-CHAINED.EFI and stage as embed_chained/chained_arm64.efi.'
+    desc: 'Build M8.0 BOOTAA64-CHAINED.EFI and stage gzipped as embed_chained/chained_arm64.efi.gz.'
     deps: [chainedhello:elf:arm64]
     cmds:
       - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-CHAINED.EFI" "{{.TASKFILE_DIR}}/app_arm64_chainedhello.elf"'
-      - 'cp "{{.TASKFILE_DIR}}/BOOTAA64-CHAINED.EFI" "{{.TASKFILE_DIR}}/internal/embed_chained/chained_arm64.efi"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTAA64-CHAINED.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained/chained_arm64.efi.gz"'
 
   chainedhello:efi:riscv64:
-    desc: 'Build M8.0 BOOTRISCV64-CHAINED.EFI and stage as embed_chained/chained_riscv64.efi.'
+    desc: 'Build M8.0 BOOTRISCV64-CHAINED.EFI and stage gzipped as embed_chained/chained_riscv64.efi.gz.'
     deps: [chainedhello:elf:riscv64]
     cmds:
       - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-CHAINED.EFI" "{{.TASKFILE_DIR}}/app_riscv64_chainedhello.elf"'
-      - 'cp "{{.TASKFILE_DIR}}/BOOTRISCV64-CHAINED.EFI" "{{.TASKFILE_DIR}}/internal/embed_chained/chained_riscv64.efi"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTRISCV64-CHAINED.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained/chained_riscv64.efi.gz"'
 
   chainedhello:efi:loong64:
-    desc: 'Build M8.0 BOOTLOONGARCH64-CHAINED.EFI and stage as embed_chained/chained_loong64.efi.'
+    desc: 'Build M8.0 BOOTLOONGARCH64-CHAINED.EFI and stage gzipped as embed_chained/chained_loong64.efi.gz.'
     deps: [chainedhello:elf:loong64]
     cmds:
       - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-CHAINED.EFI" "{{.TASKFILE_DIR}}/app_loong64_chainedhello.elf"'
-      - 'cp "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-CHAINED.EFI" "{{.TASKFILE_DIR}}/internal/embed_chained/chained_loong64.efi"'
+      - 'gzip -9 -n -c "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-CHAINED.EFI" > "{{.TASKFILE_DIR}}/internal/embed_chained/chained_loong64.efi.gz"'
 
   # efihandover:elf:<arch> — depends on chainedhello:efi:<arch> so
-  # the //go:embed directive has its target file in place before
-  # the parent is compiled. Without that dep, the embed package's
-  # build would fail with "pattern chained_<arch>.efi: no matching
-  # files found".
+  # the //go:embed directive has its target file (.efi.gz) in
+  # place before the parent is compiled. Without that dep, the
+  # embed package's build would fail with "pattern
+  # chained_<arch>.efi.gz: no matching files found".
   efihandover:elf:amd64:
     desc: 'Build app_amd64_efihandover.elf (TamaGo PIE, M8.0 chain-boot parent).'
     deps: [check-toolchain, chainedhello:efi:amd64]

@@ -7,5 +7,5 @@ package embed_chained
 
 import _ "embed"
 
-//go:embed chained_arm64.efi
-var ChainedEFI []byte
+//go:embed chained_arm64.efi.gz
+var chainedEFIGz []byte

@@ -136,6 +136,14 @@ mcopy -i "$ESP" "$NSH_PATH" "::/startup.nsh"
 case "$ARCH" in
     amd64)
         cp "$FW_VARS" "$WORK/vars.fd"
+        # The dummy virtio-net device is REQUIRED on amd64 q35 even
+        # though M8.0 has no networking probe. Without ANY -netdev
+        # backed PCI device, EDK2 stable202408's BDS on q35 skips the
+        # ESP entirely and falls straight to PXE (empirically verified
+        # 2026-06-09). Adding a unused user-mode NIC on pcie.0:03.0
+        # restores the normal ESP boot path. Same shape as the M5/M6/
+        # M7 amd64 runners — they need a NIC for their probes; we just
+        # piggy-back on the side-effect.
         QEMU_ARGS=(
             -machine q35 -cpu max -m 2048
             -display none -no-reboot
@@ -143,6 +151,8 @@ case "$ARCH" in
             -drive "if=pflash,format=raw,file=$WORK/vars.fd"
             -drive "file=$ESP,format=raw,if=none,id=esp,media=disk"
             -device "ide-hd,drive=esp"
+            -netdev "user,id=net0"
+            -device "virtio-net-pci,netdev=net0,bus=pcie.0,addr=03.0,disable-legacy=on,disable-modern=off"
             -serial stdio
         )
         ;;
@@ -209,7 +219,10 @@ ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
 EXPECT_BANNER=">>> M8.0 chained payload -- Hello from ${BANNER_ARCH} <<<"
 
 PASS=1
-grep -q "phase2-efi-handover: embed length =" "$LOG" || PASS=0
+# Note: the probe prints "embed length (decompressed) = N" since the
+# M6.1 gzip-embed mitigation; the looser pattern below matches both
+# the pre-M6.1 ("embed length =") and post-M6.1 wording.
+grep -q "phase2-efi-handover: embed length" "$LOG" || PASS=0
 grep -q "phase2-efi-handover: LoadImage OK" "$LOG" || PASS=0
 grep -q "phase2-efi-handover: StartImage entering child" "$LOG" || PASS=0
 grep -qF "$EXPECT_BANNER" "$LOG" || PASS=0
