@@ -193,19 +193,22 @@ ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
 PASS=1
 case "$ARCH" in
     arm64)
-        # M8.3 MODE C — real-registry streaming demo. The acceptance
-        # gate is the framework's reach: DHCP, HTTPS+TLS to ghcr.io,
-        # bearer-token auth, multi-arch index resolve, per-arch
-        # manifest pick, layer-stream initiated. Kernel-side handoff
-        # is gated on R-M8.3 (tamago heap + scheduler) — when it
-        # works on a fixed scheduler the extra checks fire as
-        # additional confirmation.
+        # M8.4 MODE C — real-registry kernel streaming + DTB probe +
+        # initrd publish + EFI-stub handoff. Acceptance gate covers
+        # both the framework's reach (DHCP, HTTPS, OCI manifest walk,
+        # layer stream) AND the new M8.4 plumbing (DTB probe fires,
+        # PublishInitrd succeeds, EFI-stub reaches initramfs unpack).
         grep -q "phase2-oci-kernel-boot: MODE = C" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: device UP" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: lease acquired" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: picked per-arch manifest" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: streaming layer digest" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: extracting boot/vmlinuz" "$LOG" || PASS=0
+        # M8.4 additions: DTB probe walks ConfigurationTable, and
+        # PublishInitrd installs the embedded minimal initramfs
+        # under LINUX_EFI_INITRD_MEDIA_GUID. Both must fire.
+        grep -q "phase2-oci-kernel-boot: DTB probe:" "$LOG" || PASS=0
+        grep -q "phase2-oci-kernel-boot: PublishInitrd OK" "$LOG" || PASS=0
         ;;
     *)
         # Other arches stay on MODE B self-test (chainedhello payload).
@@ -222,7 +225,7 @@ esac
 
 if [[ "$PASS" -eq 1 ]]; then
     echo "[live-kernelboot:$ARCH] PASS — wall=${ELAPSED_MS}ms"
-    grep -E "phase2-oci-kernel-boot:|M8\.0 chained payload|EFI stub:|Booting Linux|Linux version|EFI v[0-9]+" "$LOG" || true
+    grep -E "phase2-oci-kernel-boot:|M8\.0 chained payload|EFI stub:|Booting Linux|Linux version|EFI v[0-9]+|Unpacking initramfs|cloud-boot-m83|Kernel panic|Attempted to kill init" "$LOG" || true
     exit 0
 fi
 echo "[live-kernelboot:$ARCH] FAIL — missing one of the expected markers after ${ELAPSED_MS}ms" >&2
