@@ -259,7 +259,7 @@ goroutine sum: 499500
 DONE
 ```
 
-## Phase 2 — pure-Go bare-metal UEFI loader (live end-to-end on 3/4 arches)
+## Phase 2 — pure-Go bare-metal UEFI loader (live Linux userspace on all 4 arches)
 
 Phase 2 turns this image into a PXE-class pre-boot agent that runs
 inside UEFI Boot Services, fetches a `kernel + initrd` OCI artifact
@@ -318,16 +318,56 @@ PCI walk -> virtio-net -> DHCPv4 -> DNS -> TLS (CCADB roots) -> HTTPS
 | **M8.6**   | `PublishDTB` via `gBS->InstallConfigurationTable` + embedded arm64-virt DTB — R-M8.5a CLOSED                     | SHIPPED 2026-06-10 |
 | **M8.7**   | `PublishRNG` + cmdline `nokaslr random.trust_bootloader=0 random.trust_cpu=0` — R-M8.6a CLOSED                   | SHIPPED 2026-06-10 |
 | **M8.8**   | Post-EBS pl011 serial routing cmdline cleanup (drop `acpi=force`, add `keep_bootcon` + `earlyprintk=keep` + `printk.time=y`) | SHIPPED 2026-06-10 |
-| **M8.9**   | R-M8.8a chase — pre-EBS Data Abort in EDK2 DXE region (kernel→firmware path)                                     | next |
+| **M8.9..M8.12** | riscv64 + loong64 + amd64 live kernel boot bring-up (Debian 6.12.90 / 7.0.12) ; smoke matrix 8/8 GREEN | SHIPPED 2026-06-10 |
+| **M8.13**  | Debian 13 unified across all four arches                                                                         | SHIPPED 2026-06-10 |
+| **M8.14**  | `R-amd64j` CLOSED — EDK2 OVMF amd64 `LoadFile2` quirk worked around via `initrd=` kernel cmdline + ESP `SimpleFileSystem` file + `InheritParentDeviceHandle` ; amd64 lands in Linux userspace | SHIPPED 2026-06-10 |
+| **M9.0..M9.2** | Interactive boot menu (selector + cmdline editor + persistence) shipped                                      | SHIPPED 2026-06-10 |
+| **R-M9.1a** | virtio-console firmware handoff — pre-EBS console rerouting under EDK2                                          | next |
+| **R-M9.2a** | `time.Sleep` under TamaGo+UEFI — preemption-edge timer-wheel residency                                          | next |
 
 ### Live status per arch (2026-06-10)
 
-| arch    | M0..M7 | M8.0 chain-boot | M8.3 live kernel boot | Notes |
-| ------- | ------ | --------------- | --------------------- | ----- |
-| **arm64**   | ✅ | ✅ | ✅ | `ghcr.io/siderolabs/kernel` ; EFI-stub `Booting Linux Kernel...` + KASLR-disabled + DTB-via-ConfigurationTable + initrd-via-LoadFile2 |
-| **riscv64** | ✅ | ✅ | ✅ | self-published via `cmd/cloudboot-oci-extract` from Debian `linux-image-6.12.90+deb13.1-riscv64` → `ttl.sh/cloudboot-vmlinuz-riscv64:24h` ; nightly cron re-publish |
-| **loong64** | ✅ | ✅ | ✅ | self-published via `cmd/cloudboot-oci-extract` from Debian `linux-binary-7.0.12+deb14-loong64` → `ttl.sh/cloudboot-vmlinuz-loong64:24h` ; nightly cron re-publish |
-| **amd64**   | ✅ | ⚠️ | 🚧 | EDK2 OVMF firmware bug chase (`R-amd64a..g`) ; `R-amd64f #2` bypassed the firmware bug, currently chasing a Go-runtime `cannot allocate memory` regression in `R-amd64g`. LIVE not yet green. |
+All four arches reach a real Debian 13 userspace end-to-end from a
+cold DHCP lease against a public OCI registry. Wall-clock numbers
+are the firmware-to-`/sbin/init` interval observed under QEMU on
+the standard `task test:phase2:*` harness.
+
+| arch    | M0..M7 | M8.0 chain-boot | Live Linux userspace | Wall-clock | Kernel | Initrd handoff |
+| ------- | ------ | --------------- | -------------------- | ---------- | ------ | -------------- |
+| **arm64**   | ✅ | ✅ | ✅ | 17.1 s | Debian 6.12.90 | `LoadFile2` |
+| **amd64**   | ✅ | ✅ | ✅ | 16.1 s | Debian 6.12.90 | `initrd=` cmdline (ESP `SimpleFileSystem` + `InheritParentDeviceHandle`) |
+| **riscv64** | ✅ | ✅ | ✅ | 18.1 s | Debian 6.12.90 | `LoadFile2` |
+| **loong64** | ✅ | ✅ | ✅ | 17.1 s | Debian 7.0.12 | `LoadFile2` |
+
+amd64 closed on 2026-06-10 via the `R-amd64a..j` cleanup chain :
+
+- `R-amd64a..e` : EDK2 firmware `CpuPageTableLib` bug chase ; fix
+  landed upstream.
+- `R-amd64f..g` : TamaGo cpuinit `.bss` heap zero pass + an explicit
+  `goos.Bloc` `MOVQ` write the other three arches had always emitted
+  but amd64 was the outlier on.
+- `R-amd64h` : `rxLoop` allocation churn (async-preemption
+  side-effect) — surfaced as `runtime: cannot allocate memory`.
+- `R-amd64i` : `dialTLSOnce` deadline-math bug.
+- `R-amd64j` : EDK2 OVMF amd64 `LoadFile2` quirk — the firmware
+  silently mis-handles the protocol the kernel uses to fetch its
+  initrd, so the loader on amd64 falls back to the long-standing
+  `initrd=<filename>` kernel-cmdline path. The initrd is published
+  as an ESP file via `SimpleFileSystem` and the loaded kernel
+  inherits the parent image's `DeviceHandle` so the cmdline path
+  resolves against the same FS the kernel was loaded from. The
+  other three arches retain the `LoadFile2` protocol path.
+
+The amd64 smoke matrix is 8/8 GREEN post-`R-amd64j` (R-amd64a..j
+saga closed). A nightly cron re-publishes a fresh `vmlinuz` for
+each of the four arches.
+
+Known sharp edges still tracked :
+
+- `R-M9.1a` — virtio-console firmware handoff under EDK2 (pre-EBS
+  console rerouting path).
+- `R-M9.2a` — `time.Sleep` under TamaGo + UEFI (preemption-edge
+  timer-wheel residency).
 
 ### M0 probe (historical reference)
 
