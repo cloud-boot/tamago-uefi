@@ -133,15 +133,48 @@ case "$ARCH" in
         # M8.3: arm64 runs MODE C (real-registry streaming) and needs
         # outbound networking to ghcr.io. The other arches stay on
         # MODE B (self-test) and don't need a netdev.
+        #
+        # M8.10 (R-M8.9a) ROOT CAUSE for post-EBS silence (2026-06-10)
+        #
+        # After M8.9 closed the pre-EBS Data Abort, the EFI-stub
+        # reached a clean "Exiting boot services and installing
+        # virtual address map..." then ZERO bytes — not a glyph,
+        # not an ANSI escape. `-d int,unimp,guest_errors` showed
+        # the CPU stuck in a tight IRQ loop with every timer tick
+        # vectored to EDK2's stale IVT at EL1 PC 0x13fd5f280,
+        # never reaching the kernel's exception vectors.
+        #
+        # Bisected by booting the same kernel directly via QEMU
+        # `-kernel` (bypassing our EFI loader entirely). Same
+        # silence. The kernel's `-cpu` choice was the variable:
+        #
+        #   -cpu max         : ZERO output post-Booting Linux.
+        #   -cpu cortex-a57  : 517 lines of clean kernel log.
+        #
+        # The Talos kernel pinned by the OCI ref
+        # ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc is
+        # Linux 5.10.29 (from 2021-05-14). `-cpu max` on QEMU 9.x
+        # exposes CPU features (SVE2, FEAT_RNG, FEAT_HCX, …) that
+        # this old kernel doesn't know how to gate, and it crashes
+        # in very early head.S before VBAR_EL1 is set up. The
+        # stale firmware IVT then loops on every timer tick.
+        #
+        # Fix: pin `-cpu cortex-a72` — a real-world arm64 SoC
+        # CPU that the 5.10 kernel was actually tested against
+        # (Raspberry Pi 4, AWS Graviton 1 family), present in
+        # QEMU since forever, and exposes no surprise features.
+        # cortex-a57 also works but a72 is closer to what real
+        # Talos arm64 deployments target.
         QEMU_ARGS=(
-            -machine virt -cpu max -m 4096
+            -machine virt -cpu cortex-a72 -m 4096
             -display none -no-reboot
             -bios "$FW_CODE"
             -drive "file=$ESP,format=raw,if=none,id=esp"
             -device "virtio-blk-pci,drive=esp"
             -netdev "user,id=n0"
             -device "virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off"
-            -serial stdio
+            -chardev "stdio,id=char0,mux=off,signal=off"
+            -serial "chardev:char0"
         )
         ;;
     riscv64)
@@ -244,6 +277,15 @@ case "$ARCH" in
         if [[ "$ARCH" == "arm64" ]]; then
             grep -q "phase2-oci-kernel-boot: DTB published" "$LOG" || PASS=0
             grep -q "EFI stub: Using DTB from configuration table" "$LOG" || PASS=0
+            # M8.10 closure (R-M8.9a): FIRST FULL END-TO-END
+            # KERNEL BOOT — the Linux EFI-stub now reaches
+            # ExitBootServices, the kernel proper takes over,
+            # runs through head.S + start_kernel, mounts the
+            # initramfs as / and execs our /init. The Path D
+            # banner is the load-bearing proof.
+            grep -q "Run /init as init process" "$LOG" || PASS=0
+            grep -q "cloud-boot/openweft Phase 2 Path D" "$LOG" || PASS=0
+            grep -q "reboot: Power down" "$LOG" || PASS=0
         fi
         ;;
     *)
@@ -261,7 +303,7 @@ esac
 
 if [[ "$PASS" -eq 1 ]]; then
     echo "[live-kernelboot:$ARCH] PASS — wall=${ELAPSED_MS}ms"
-    grep -E "phase2-oci-kernel-boot:|M8\.0 chained payload|EFI stub:|Booting Linux|Linux version|EFI v[0-9]+|Unpacking initramfs|cloud-boot-m83|Kernel panic|Attempted to kill init" "$LOG" || true
+    grep -E "phase2-oci-kernel-boot:|M8\.0 chained payload|EFI stub:|Booting Linux|Linux version|EFI v[0-9]+|Unpacking initramfs|cloud-boot-m83|Kernel panic|Attempted to kill init|Run /init as init process|Path D|Pseudo-filesystem|Kernel cmdline|Kernel: |Total RAM|reboot: Power down" "$LOG" || true
     exit 0
 fi
 echo "[live-kernelboot:$ARCH] FAIL — missing one of the expected markers after ${ELAPSED_MS}ms" >&2

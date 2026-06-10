@@ -140,7 +140,34 @@ package main
 
 var (
 	kernelBootTargetRef = "https://ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc"
-	kernelBootCmdline   = "console=ttyAMA0,115200 " +
+	// M8.10 (R-M8.9a) ROOT CAUSE for post-EBS silence (2026-06-10)
+	//
+	// After M8.9 closed (UninstallAllRNG cleared the pre-EBS Data
+	// Abort), EFI-stub trace reached "Exiting boot services and
+	// installing virtual address map..." then ZERO bytes on PL011.
+	//
+	// Bisection by booting the same Talos kernel directly via
+	// QEMU `-kernel` (bypassing our EFI loader entirely):
+	//   - With `-cpu max`         : ZERO bytes on PL011.
+	//   - With `-cpu cortex-a72`  : 517 lines of clean kernel log.
+	//
+	// Linux 5.10.29 (the kernel pinned by the OCI ref) doesn't
+	// know how to gate the modern CPU features `-cpu max` exposes
+	// on QEMU 9.x (SVE2, FEAT_RNG, FEAT_HCX, …) and crashes very
+	// early in head.S before VBAR_EL1 is installed. The stale
+	// firmware IRQ vector then re-enters itself on every timer
+	// tick (visible under `-d int,unimp,guest_errors`).
+	//
+	// Fix: pin `-cpu cortex-a72` in the QEMU runner. Cmdline
+	// returns to the M8.8 baseline — none of the cmdline tweaks
+	// (n8 baud, debug, ignore_loglevel, hvc0 pivot, etc.) made
+	// any difference because the kernel was never running far
+	// enough to read its console= argument.
+	//
+	// Embedded DTB inspection (dtc -I dtb -O dts) confirmed a
+	// clean pl011@9000000 + chosen/stdout-path = "/pl011@9000000"
+	// + serial0 alias. DTB was correct all along.
+	kernelBootCmdline = "console=ttyAMA0,115200 " +
 		"earlycon=pl011,mmio32,0x9000000 keep_bootcon earlyprintk=keep " +
 		"printk.time=y " +
 		"root=/dev/ram0 rdinit=/init " +
