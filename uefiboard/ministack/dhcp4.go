@@ -32,6 +32,10 @@
 //   - 1 (Subnet Mask)        — extracted from ACK.
 //   - 3 (Router)             — extracted from ACK (default gateway).
 //   - 6 (DNS Server)         — extracted from ACK (up to 4 entries).
+//   - 67 (Bootfile-Name)     — extracted from ACK as a UTF-8 string
+//     (RFC 2132 §9.5). M9.0 carries an OCI ref here (e.g.
+//     "ghcr.io/myorg/bootconfig:v1.0") for the DHCP-discovered OCI
+//     boot-menu path.
 //   - 255 (End)              — terminator.
 //
 // The xid (transaction identifier) is generated from a deterministic
@@ -98,6 +102,7 @@ const (
 	dhcp4OptServerID       uint8 = 54
 	dhcp4OptParameterList  uint8 = 55
 	dhcp4OptClientID       uint8 = 61
+	dhcp4OptBootfileName   uint8 = 67
 	dhcp4OptEnd            uint8 = 255
 )
 
@@ -121,6 +126,23 @@ type DHCP4Lease struct {
 	DNS      []net.IP
 	Server   net.IP
 	Duration time.Duration
+
+	// BootfileName is the value of DHCP option 67 (Bootfile-Name,
+	// RFC 2132 §9.5) from the DHCPACK, decoded as a UTF-8 string with
+	// any trailing NUL bytes trimmed. Empty when the option was not
+	// present in the ACK.
+	//
+	// For the cloud-boot M9 "DHCP-discovered OCI boot menu" path this
+	// field carries an OCI ref (e.g. "ghcr.io/myorg/bootconfig:v1.0")
+	// — cloud-boot then walks the OCI distribution v2 spec to fetch
+	// the HCL boot-config artifact and renders / dispatches a menu.
+	BootfileName string
+
+	// Parameter Request List members 1/3/6/51 are the only ones
+	// ministack actively consumes; 67 was added in M9.0 (DHCP option
+	// 67 extraction for the OCI-boot-menu path) and is requested in
+	// the parameter list so RFC-compliant servers will include it
+	// even when not configured as a default.
 }
 
 // dhcp4Options is a parsed option set. Each value is the raw bytes
@@ -241,13 +263,19 @@ func dhcp4ClientIDFromMAC(mac net.HardwareAddr) []byte {
 }
 
 // dhcp4ParameterRequestList is the option-55 value: a list of option
-// codes the client wants the server to include in its OFFER/ACK.
+// codes the client wants the server to include in its OFFER/ACK. The
+// Bootfile-Name (option 67) was added in M9.0 to enable the
+// DHCP-discovered OCI boot-menu path — RFC 2131 §3.5 requires a
+// compliant server to honour a Parameter Request List entry, so
+// servers configured with `bootfile-name` (ISC dhcpd) or QEMU's
+// `-netdev user,bootfile=...` will include it in the ACK.
 func dhcp4ParameterRequestList() []byte {
 	return []byte{
 		dhcp4OptSubnetMask,
 		dhcp4OptRouter,
 		dhcp4OptDNS,
 		dhcp4OptLeaseTime,
+		dhcp4OptBootfileName,
 	}
 }
 
@@ -306,6 +334,19 @@ func dhcp4LeaseFromOptions(yiaddr net.IP, opts dhcp4Options) DHCP4Lease {
 	if l, ok := opts[dhcp4OptLeaseTime]; ok && len(l) == 4 {
 		secs := binary.BigEndian.Uint32(l)
 		lease.Duration = time.Duration(secs) * time.Second
+	}
+	if bf, ok := opts[dhcp4OptBootfileName]; ok {
+		// Per RFC 2132 §9.5 the option value is a sequence of bytes
+		// representing the file name. Some servers (notably ISC dhcpd
+		// when the value is set via a string literal) trail a NUL
+		// terminator to fill the 128-byte sname/file BOOTP field;
+		// strip any trailing NULs so the OCI ref parser sees a clean
+		// UTF-8 string.
+		end := len(bf)
+		for end > 0 && bf[end-1] == 0 {
+			end--
+		}
+		lease.BootfileName = string(bf[:end])
 	}
 	return lease
 }

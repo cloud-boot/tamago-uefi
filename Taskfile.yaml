@@ -2160,6 +2160,118 @@ tasks:
       - 'bash "{{.TASKFILE_DIR}}/internal/livekernelboot/run.sh" loong64'
 
   # =====================================================================
+  # M9.0 — DHCP-discovered OCI boot menu (foundation)
+  # =====================================================================
+  #
+  # Builds the Phase-2 M9.0 probe BOOT*-DHCPOCIMENU.EFI per arch. The
+  # probe extracts DHCP option 67 (Bootfile-Name) from the DHCPACK,
+  # interprets it as an OCI ref, fetches the HCL boot-menu artifact via
+  # the M7 streaming OCI client + ministack network roots, parses it
+  # through uefiboard/bootmenu, and prints the parsed *BootConfig.
+  #
+  # Out of scope for M9.0: virtio-console rendering (M9.1) and EFI input
+  # + LoadImage/StartImage dispatch (M9.2). The probe stops after
+  # printing the parsed schema; the live runner asserts on the printed
+  # lines.
+  dhcpocimenu:elf:amd64:
+    desc: 'Build app_amd64_dhcpocimenu.elf (TamaGo PIE, M9.0 probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_dhcp_oci_menu -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_dhcpocimenu.elf .'
+
+  dhcpocimenu:elf:arm64:
+    desc: 'Build app_arm64_dhcpocimenu.elf (TamaGo PIE, M9.0 probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: arm64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_dhcp_oci_menu -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_arm64_dhcpocimenu.elf .'
+
+  dhcpocimenu:elf:riscv64:
+    desc: 'Build app_riscv64_dhcpocimenu.elf (TamaGo PIE, M9.0 probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: riscv64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_dhcp_oci_menu -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_riscv64_dhcpocimenu.elf .'
+
+  dhcpocimenu:elf:loong64:
+    desc: 'Build app_loong64_dhcpocimenu.elf (TamaGo PIE, M9.0 probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: loong64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase2_dhcp_oci_menu -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_loong64_dhcpocimenu.elf .'
+
+  dhcpocimenu:efi:amd64:
+    desc: 'Build Phase-2 M9.0 BOOTX64-DHCPOCIMENU.EFI.'
+    deps: [dhcpocimenu:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-DHCPOCIMENU.EFI" "{{.TASKFILE_DIR}}/app_amd64_dhcpocimenu.elf"'
+
+  dhcpocimenu:efi:arm64:
+    desc: 'Build Phase-2 M9.0 BOOTAA64-DHCPOCIMENU.EFI.'
+    deps: [dhcpocimenu:elf:arm64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTAA64-DHCPOCIMENU.EFI" "{{.TASKFILE_DIR}}/app_arm64_dhcpocimenu.elf"'
+
+  dhcpocimenu:efi:riscv64:
+    desc: 'Build Phase-2 M9.0 BOOTRISCV64-DHCPOCIMENU.EFI.'
+    deps: [dhcpocimenu:elf:riscv64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTRISCV64-DHCPOCIMENU.EFI" "{{.TASKFILE_DIR}}/app_riscv64_dhcpocimenu.elf"'
+
+  dhcpocimenu:efi:loong64:
+    desc: 'Build Phase-2 M9.0 BOOTLOONGARCH64-DHCPOCIMENU.EFI.'
+    deps: [dhcpocimenu:elf:loong64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTLOONGARCH64-DHCPOCIMENU.EFI" "{{.TASKFILE_DIR}}/app_loong64_dhcpocimenu.elf"'
+
+  dhcpocimenu:all:
+    desc: 'Build all four Phase-2 M9.0 DHCP-OCI-menu EFIs.'
+    cmds:
+      - task: dhcpocimenu:efi:amd64
+      - task: dhcpocimenu:efi:arm64
+      - task: dhcpocimenu:efi:riscv64
+      - task: dhcpocimenu:efi:loong64
+
+  dhcpocimenu:live:arm64:
+    desc: 'Live M9.0 smoke from BOOTAA64-DHCPOCIMENU.EFI under QEMU+EDK2 (DHCP-injects ttl.sh ref via QEMU user-mode bootfile= ).'
+    deps: [dhcpocimenu:efi:arm64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livedhcpocimenu/run.sh" arm64'
+
+  dhcpocimenu:live:riscv64:
+    desc: 'Live M9.0 smoke from BOOTRISCV64-DHCPOCIMENU.EFI under QEMU+EDK2.'
+    deps: [dhcpocimenu:efi:riscv64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livedhcpocimenu/run.sh" riscv64'
+
+  dhcpocimenu:live:loong64:
+    desc: 'Live M9.0 smoke from BOOTLOONGARCH64-DHCPOCIMENU.EFI under QEMU+EDK2.'
+    deps: [dhcpocimenu:efi:loong64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livedhcpocimenu/run.sh" loong64'
+
+  # =====================================================================
   # VZ (Apple Virtualization.framework via vfkit) compatibility audit
   # =====================================================================
   #
@@ -2267,6 +2379,8 @@ tasks:
       - rm -f BOOTX64-OCISTREAM.EFI BOOTAA64-OCISTREAM.EFI BOOTRISCV64-OCISTREAM.EFI BOOTLOONGARCH64-OCISTREAM.EFI
       - rm -f app_amd64_kernelboot.elf app_arm64_kernelboot.elf app_riscv64_kernelboot.elf app_loong64_kernelboot.elf
       - rm -f BOOTX64-KERNELBOOT.EFI BOOTAA64-KERNELBOOT.EFI BOOTRISCV64-KERNELBOOT.EFI BOOTLOONGARCH64-KERNELBOOT.EFI
+      - rm -f app_amd64_dhcpocimenu.elf app_arm64_dhcpocimenu.elf app_riscv64_dhcpocimenu.elf app_loong64_dhcpocimenu.elf
+      - rm -f BOOTX64-DHCPOCIMENU.EFI BOOTAA64-DHCPOCIMENU.EFI BOOTRISCV64-DHCPOCIMENU.EFI BOOTLOONGARCH64-DHCPOCIMENU.EFI
       - rm -f BOOTX64-CHAINED.EFI BOOTAA64-CHAINED.EFI BOOTRISCV64-CHAINED.EFI BOOTLOONGARCH64-CHAINED.EFI
       - rm -f BOOTX64-EFIHANDOVER.EFI BOOTAA64-EFIHANDOVER.EFI BOOTRISCV64-EFIHANDOVER.EFI BOOTLOONGARCH64-EFIHANDOVER.EFI
       - rm -f internal/embed_chained/chained_amd64.efi internal/embed_chained/chained_arm64.efi internal/embed_chained/chained_riscv64.efi internal/embed_chained/chained_loong64.efi

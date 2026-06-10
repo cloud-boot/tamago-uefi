@@ -714,7 +714,7 @@ func TestDHCP4AcquireFailsOnOpenedPort(t *testing.T) {
 
 func TestDHCP4ParameterRequestList(t *testing.T) {
 	prl := dhcp4ParameterRequestList()
-	wantTags := []uint8{dhcp4OptSubnetMask, dhcp4OptRouter, dhcp4OptDNS, dhcp4OptLeaseTime}
+	wantTags := []uint8{dhcp4OptSubnetMask, dhcp4OptRouter, dhcp4OptDNS, dhcp4OptLeaseTime, dhcp4OptBootfileName}
 	if len(prl) != len(wantTags) {
 		t.Fatalf("length: got %d, want %d", len(prl), len(wantTags))
 	}
@@ -722,5 +722,100 @@ func TestDHCP4ParameterRequestList(t *testing.T) {
 		if prl[i] != want {
 			t.Errorf("entry %d: got %d, want %d", i, prl[i], want)
 		}
+	}
+}
+
+// TestDHCP4LeaseExtractsBootfileName covers the M9.0 deliverable:
+// DHCP option 67 (Bootfile-Name) is parsed off the ACK and surfaced on
+// DHCP4Lease.BootfileName as a plain UTF-8 string. The OCI-ref shape
+// is exactly what cloud-boot's M9 menu path expects to consume.
+func TestDHCP4LeaseExtractsBootfileName(t *testing.T) {
+	yi := net.IPv4(10, 0, 2, 15).To4()
+	ref := "ghcr.io/myorg/bootconfig:v1.0"
+	opts := dhcp4Options{
+		dhcp4OptSubnetMask:   {255, 255, 255, 0},
+		dhcp4OptRouter:       {10, 0, 2, 2},
+		dhcp4OptBootfileName: []byte(ref),
+	}
+	lease := dhcp4LeaseFromOptions(yi, opts)
+	if lease.BootfileName != ref {
+		t.Errorf("BootfileName: got %q, want %q", lease.BootfileName, ref)
+	}
+}
+
+// TestDHCP4LeaseBootfileNameTrimsTrailingNULs covers the ISC-dhcpd
+// quirk where the option value is padded to the BOOTP file-field width
+// with trailing NUL bytes. We must NOT include those NULs in the OCI
+// ref string — oci.ParseRef would barf on them.
+func TestDHCP4LeaseBootfileNameTrimsTrailingNULs(t *testing.T) {
+	yi := net.IPv4(10, 0, 2, 15).To4()
+	ref := "ghcr.io/myorg/bootconfig:v1.0"
+	padded := append([]byte(ref), 0, 0, 0, 0)
+	opts := dhcp4Options{dhcp4OptBootfileName: padded}
+	lease := dhcp4LeaseFromOptions(yi, opts)
+	if lease.BootfileName != ref {
+		t.Errorf("BootfileName: got %q (len=%d), want %q (len=%d)",
+			lease.BootfileName, len(lease.BootfileName), ref, len(ref))
+	}
+}
+
+// TestDHCP4LeaseBootfileNameAbsent: when the server does not include
+// option 67 the field is empty (cloud-boot's M9 dispatch then takes
+// the "no menu, fall through" branch).
+func TestDHCP4LeaseBootfileNameAbsent(t *testing.T) {
+	yi := net.IPv4(10, 0, 2, 15).To4()
+	lease := dhcp4LeaseFromOptions(yi, dhcp4Options{})
+	if lease.BootfileName != "" {
+		t.Errorf("BootfileName: got %q, want empty", lease.BootfileName)
+	}
+}
+
+// TestDHCP4ParseMessageWithOption67 walks the full BOOTP/DHCP wire-
+// format path: we hand-craft an ACK buffer containing option 67 with a
+// sample OCI ref, run it through parseDHCP4Message + the lease
+// builder, and verify BootfileName surfaces end-to-end. This is the
+// host-side acceptance test for M9.0 deliverable #1.
+func TestDHCP4ParseMessageWithOption67(t *testing.T) {
+	mac := net.HardwareAddr{0x52, 0x54, 0x00, 0x12, 0x34, 0x56}
+	xid := uint32(0x4D39_0F00) // "M9.0\x00"
+	ref := "ghcr.io/myorg/bootconfig:v1.0"
+	opts := marshalDHCP4Options([]dhcp4OptionEntry{
+		{tag: dhcp4OptMessageType, value: []byte{dhcp4MsgAck}},
+		{tag: dhcp4OptServerID, value: []byte{10, 0, 2, 2}},
+		{tag: dhcp4OptSubnetMask, value: []byte{255, 255, 255, 0}},
+		{tag: dhcp4OptRouter, value: []byte{10, 0, 2, 2}},
+		{tag: dhcp4OptLeaseTime, value: []byte{0, 1, 0x51, 0x80}},
+		{tag: dhcp4OptBootfileName, value: []byte(ref)},
+	})
+	msg, err := buildDHCP4Message(xid, mac, opts)
+	if err != nil {
+		t.Fatalf("buildDHCP4Message: %v", err)
+	}
+	msg[0] = dhcp4BootReply
+	copy(msg[16:20], []byte{10, 0, 2, 15})
+
+	gotXID, yi, parsed, err := parseDHCP4Message(msg)
+	if err != nil {
+		t.Fatalf("parseDHCP4Message: %v", err)
+	}
+	if gotXID != xid {
+		t.Errorf("xid: got %#x, want %#x", gotXID, xid)
+	}
+	if !yi.Equal(net.IPv4(10, 0, 2, 15)) {
+		t.Errorf("yiaddr: got %v, want 10.0.2.15", yi)
+	}
+	mtype, mErr := parseDHCP4MessageType(parsed)
+	if mErr != nil || mtype != dhcp4MsgAck {
+		t.Fatalf("message type: got %d, err=%v, want ACK", mtype, mErr)
+	}
+	lease := dhcp4LeaseFromOptions(yi, parsed)
+	if lease.BootfileName != ref {
+		t.Errorf("end-to-end BootfileName: got %q, want %q", lease.BootfileName, ref)
+	}
+	if !lease.IP.Equal(net.IPv4(10, 0, 2, 15)) {
+		t.Errorf("IP: got %v, want 10.0.2.15", lease.IP)
+	}
+	if !lease.Gateway.Equal(net.IPv4(10, 0, 2, 2)) {
+		t.Errorf("Gateway: got %v, want 10.0.2.2", lease.Gateway)
 	}
 }
