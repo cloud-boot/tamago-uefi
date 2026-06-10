@@ -779,6 +779,27 @@ func runKernelBootLinuxKernel() {
 	}
 	println("phase2-oci-kernel-boot: SetLoadOptions OK; cmdline len =", len(kernelBootCmdline))
 
+	// M8.14 (R-amd64j) — on "espfile" arches (amd64) we copy our
+	// parent LoadedImage.DeviceHandle + FilePath into the kernel's
+	// LoadedImage so the EFI-stub's cmdline-driven `initrd=<path>`
+	// loader (drivers/firmware/efi/libstub/file.c handle_cmdline_files
+	// → efi_open_volume) can read the initrd from the ESP we already
+	// booted from. Without this, the firmware leaves the kernel's
+	// DeviceHandle NULL (LoadImage was called with SourceBuffer +
+	// no FilePath — MdeModulePkg/Core/Dxe/Image/Image.c CoreLoadImage)
+	// and `efi_open_volume(image)` fails closed.
+	//
+	// "protocol" arches (arm64/riscv64/loong64) skip this — they
+	// publish LINUX_EFI_INITRD_MEDIA_GUID + LoadFile2 below instead.
+	if kernelBootInitrdMode == "espfile" {
+		if ierr := uefiboard.InheritParentDeviceHandle(handle); ierr != nil {
+			println("phase2-oci-kernel-boot: InheritParentDeviceHandle FAILED:", ierr.Error())
+			println("phase2-oci-kernel-boot: KERNEL-BOOT FAIL:", ierr.Error())
+			return
+		}
+		println("phase2-oci-kernel-boot: InheritParentDeviceHandle OK (espfile mode; kernel inherits parent ESP DeviceHandle)")
+	}
+
 	// DTB probe (M8.4). Linux's EFI-stub auto-locates the
 	// flattened device tree by scanning gST->ConfigurationTable for
 	// EFI_DTB_TABLE_GUID. On EDK2 stable202408 + QEMU virt the
@@ -836,6 +857,15 @@ func runKernelBootLinuxKernel() {
 	//   uefiboard.LoadFileTraceEnabled = true
 	var initrdHandle uintptr
 	switch {
+	case kernelBootInitrdMode == "espfile":
+		// amd64 R-amd64j: initrd is loaded by the kernel EFI-stub
+		// itself from the ESP via the cmdline `initrd=<path>` token
+		// (resolved against the parent DeviceHandle we just inherited
+		// above). Nothing for us to publish here — staging the file on
+		// the ESP is the run.sh/runner job; if the runner forgets we
+		// will get a kernel-side "Failed to load initrd" line in the
+		// boot log instead of a silent skip.
+		println("phase2-oci-kernel-boot: initrd source = ESP file (R-amd64j espfile mode; kernel will read via cmdline initrd=<path>)")
 	case kernelBootInitrdRef != "":
 		println("phase2-oci-kernel-boot: streaming initrd from OCI:", kernelBootInitrdRef)
 		initrdBytes, ierr := fetchInitrdFromOCI(s, lease.DNS[0], kernelBootInitrdRef)

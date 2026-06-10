@@ -98,4 +98,8 @@ var (
 		"loglevel=8 panic=10"
 	kernelBootInitrdRef         = ""
 	kernelBootUseEmbeddedInitrd = true
+	// kernelBootInitrdMode = "protocol" — riscv64 EDK2 publishes
+	// LoadFile2 cleanly; PublishInitrd path works as proven in M8.11.
+	// See kernelboot_amd64.go for the "espfile" alternative.
+	kernelBootInitrdMode = "protocol"
 )

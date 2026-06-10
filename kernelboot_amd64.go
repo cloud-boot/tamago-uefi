@@ -47,13 +47,21 @@
 //     -dst 'ttl.sh/cloudboot-vmlinuz-amd64:24h' \
 //     -cmdline-hint 'console=ttyS0,115200 earlyprintk=ttyS0,115200'
 //
-// amd64 live test gating: still blocked behind the OVMF >4 MiB
-// firmware-size sprint (m6-2-pr2-amd64-wip). When that sprint lands,
-// `task kernelboot:live:amd64` should reach `Run /init as init process`
-// and the Path D banner with ZERO further wiring changes — the
-// per-arch initramfs (initramfs_amd64.cpio.gz embed gated by
-// //go:build amd64) follows the same pattern as the riscv64+loong64
-// M8.11/M8.12 fan-out.
+// amd64 live test gating: cleared by M8.14 (R-amd64j, 2026-06-10) via
+// the ESP-file initrd workaround — EDK2 OVMF amd64's LoadFile2
+// implementation has a buffer-swap quirk where the address it passes
+// to our callback is not the buffer the kernel later reads from
+// (Phase 3, cloud-boot/docs@14484d3). amd64 therefore uses
+// kernelBootInitrdMode = "espfile": initrd.gz is staged on the ESP at
+// `\initrd.gz` by internal/livekernelboot/run.sh; the kernel EFI-stub
+// loads it via cmdline `initrd=\initrd.gz` (handle_cmdline_files →
+// efi_open_volume in drivers/firmware/efi/libstub/file.c). To make
+// `efi_open_volume(image)` succeed, the InheritParentDeviceHandle
+// helper in uefiboard copies our parent LoadedImage.DeviceHandle into
+// the kernel's LoadedImage between LoadImage and StartImage.
+//
+// arm64/riscv64/loong64 keep kernelBootInitrdMode = "protocol" (the
+// LoadFile2 publish path proven in M8.10/M8.11/M8.12).
 
 //go:build phase2_oci_kernel_boot && tamago && amd64
 
@@ -63,8 +71,17 @@ var (
 	kernelBootTargetRef = "https://ttl.sh/cloudboot-vmlinuz-amd64:24h"
 	kernelBootCmdline   = "console=ttyS0,115200 earlyprintk=ttyS0,115200 " +
 		"keep_bootcon printk.time=y " +
-		"root=/dev/ram0 rdinit=/init " +
+		"root=/dev/ram0 rdinit=/init initrd=\\initrd.gz " +
 		"loglevel=8 panic=10"
 	kernelBootInitrdRef         = ""
-	kernelBootUseEmbeddedInitrd = true
+	kernelBootUseEmbeddedInitrd = false
+	// kernelBootInitrdMode selects the initrd-publish mechanism.
+	// "protocol" → install EFI_LOAD_FILE2_PROTOCOL under
+	//              LINUX_EFI_INITRD_MEDIA_GUID (arm64/riscv64/loong64).
+	// "espfile"  → stage initrd.gz on the ESP, inherit the parent's
+	//              DeviceHandle into the kernel's LoadedImage, and let
+	//              the EFI-stub's `initrd=<path>` cmdline path load it
+	//              from the ESP filesystem (amd64 — R-amd64j workaround
+	//              for the EDK2 OVMF amd64 LoadFile2 buffer-swap quirk).
+	kernelBootInitrdMode = "espfile"
 )
