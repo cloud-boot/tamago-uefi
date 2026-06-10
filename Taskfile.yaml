@@ -2254,10 +2254,16 @@ tasks:
       - task: dhcpocimenu:efi:loong64
 
   dhcpocimenu:live:arm64:
-    desc: 'Live M9.0 smoke from BOOTAA64-DHCPOCIMENU.EFI under QEMU+EDK2 (DHCP-injects ttl.sh ref via QEMU user-mode bootfile= ).'
+    desc: 'Live M9.x smoke from BOOTAA64-DHCPOCIMENU.EFI under QEMU+EDK2 (M9.0 DHCP+OCI+parse, M9.1 render, M9.2 menu loop + auto-boot dispatch). DHCP-injects ttl.sh ref via QEMU user-mode bootfile=.'
     deps: [dhcpocimenu:efi:arm64]
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/livedhcpocimenu/run.sh" arm64'
+
+  dhcpocimenu:live:arm64:interactive:
+    desc: 'Live M9.2 interactive variant of dhcpocimenu:live:arm64. Skips the M9.2 dispatch gate so a human can poke the menu with the keyboard. Sets M9_LIVE_NOAUTO=1.'
+    deps: [dhcpocimenu:efi:arm64]
+    cmds:
+      - 'M9_LIVE_NOAUTO=1 bash "{{.TASKFILE_DIR}}/internal/livedhcpocimenu/run.sh" arm64'
 
   dhcpocimenu:live:riscv64:
     desc: 'Live M9.0 smoke from BOOTRISCV64-DHCPOCIMENU.EFI under QEMU+EDK2.'

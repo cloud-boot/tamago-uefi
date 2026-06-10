@@ -3,7 +3,8 @@ module github.com/cloud-boot/tamago-uefi
 go 1.26.3
 
 require (
-	github.com/go-virtio/common v0.1.0
+	github.com/go-virtio/common v0.1.4
+	github.com/go-virtio/console v0.1.0
 	github.com/go-virtio/net v0.1.0
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/opencontainers/go-digest v1.0.0

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Phase-2 M9.0 live smoke under QEMU+EDK2. One arch per invocation
+# Phase-2 M9.x live smoke under QEMU+EDK2. One arch per invocation
 # (only arm64 wired for the first sprint; the other arches reuse the
 # same Go source — adding them is a one-line case extension).
 #
@@ -13,11 +13,26 @@
 #      ref like ttl.sh/cloudboot-m90-<rand>:24h.
 #   3. Boots qemu-system-<arch> with EDK2 firmware + virtio-net under
 #      user-mode networking with `-netdev user,bootfile=<oci-ref>` to
-#      inject the OCI ref as DHCP option 67.
-#   4. Captures stdout for up to 90 s and asserts:
-#        - "phase2-dhcp-oci-menu: lease acquired"
-#        - "phase2-dhcp-oci-menu: bootfile-name = ttl.sh/..."
-#        - "phase2-dhcp-oci-menu: parsed BootConfig" + "title = "
+#      inject the OCI ref as DHCP option 67. Also adds
+#      `-device virtio-serial-pci -device virtconsole,...` so the
+#      M9.1 renderer goes through the virtio-console path
+#      (with a ConOut fallback validated on bare-ConOut runners).
+#   4. Captures stdout for up to M9_LIVE_TIMEOUT seconds and asserts
+#      the M9.x acceptance gate:
+#        - "phase2-dhcp-oci-menu: lease acquired"            (M9.0)
+#        - "phase2-dhcp-oci-menu: bootfile-name = ttl.sh/..." (M9.0)
+#        - "phase2-dhcp-oci-menu: parsed BootConfig"          (M9.0)
+#        - "title = "                                         (M9.0)
+#      Plus (when M9_LIVE_NOAUTO is NOT set; the auto-confirm path):
+#        - "phase2-dhcp-oci-menu: auto-boot countdown expired"  (M9.2)
+#        - "phase2-dhcp-oci-menu: bootEntry: kernel_ref ="     (M9.2)
+#      The countdown gate proves the menu loop ran and the dispatch
+#      gate proves the selected entry was wired into the per-entry
+#      fetcher. The fake `ghcr.io/myorg/...` refs in the inline HCL
+#      fixture mean the dispatch will fail at the kernel manifest
+#      fetch (no auth, no manifest); that's fine — the gate is "the
+#      bootEntry function was reached with the right kernel_ref", not
+#      "the kernel actually booted".
 #
 # Environment overrides:
 #
@@ -28,6 +43,10 @@
 #                              inline sample below; useful for
 #                              quick iteration without editing this
 #                              script)
+#   M9_LIVE_NOAUTO:            1 → skip the M9.2 auto-boot gate
+#                              (interactive mode; a human is expected
+#                              to poke at the menu manually). The
+#                              M9.0-only gates still apply.
 set -euo pipefail
 
 ARCH="${1:-}"
@@ -37,7 +56,7 @@ if [[ -z "$ARCH" ]]; then
 fi
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TIMEOUT_SECONDS="${M9_LIVE_TIMEOUT:-90}"
+TIMEOUT_SECONDS="${M9_LIVE_TIMEOUT:-120}"
 
 case "$ARCH" in
     arm64)
@@ -108,6 +127,13 @@ echo "[live-dhcpocimenu:$ARCH] publishing $HCL_PATH to $OCI_REF" >&2
 
 # 3) Boot QEMU with -netdev user,bootfile=<oci-ref>
 #    bootfile= maps directly to DHCP option 67 in QEMU's SLIRP stack.
+#    -device virtio-serial-pci + -device virtconsole exposes a
+#    modern virtio-console (PCI device 0x1043) the M9.1 renderer
+#    binds — the menu paints over the virtio-console char dev, and
+#    runtime prints continue to flow over the existing -serial char
+#    dev. The M9.1 ConOut fallback is kept reachable by NOT requiring
+#    virtio-console on every runner: omitting these two -device lines
+#    is a supported configuration the M9.1 code still handles.
 QEMU_ARGS=(
     -machine virt -cpu cortex-a72 -m 4096
     -display none -no-reboot
@@ -117,6 +143,9 @@ QEMU_ARGS=(
     -netdev "user,id=net0,bootfile=$OCI_REF"
     -object "filter-dump,id=f0,netdev=net0,file=$WORK/net.pcap"
     -device "virtio-net-pci,netdev=net0,disable-legacy=on,disable-modern=off"
+    -device "virtio-serial-pci,id=vser0"
+    -chardev "file,id=vcon0,path=$WORK/virtcon.log"
+    -device "virtconsole,chardev=vcon0,id=vc0"
     -chardev "stdio,id=char0,mux=off,signal=off"
     -serial "chardev:char0"
 )
@@ -135,18 +164,43 @@ ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
 
 # 4) Verify gates
 PASS=1
-grep -q "phase2-dhcp-oci-menu: lease acquired" "$LOG" || PASS=0
-grep -q "phase2-dhcp-oci-menu: bootfile-name = ttl.sh/cloudboot-m90-" "$LOG" || PASS=0
-grep -q "phase2-dhcp-oci-menu: parsed BootConfig" "$LOG" || PASS=0
-grep -q "title =" "$LOG" || PASS=0
+MISSING=()
+check_gate() {
+    local pattern="$1"
+    local name="$2"
+    if ! grep -q "$pattern" "$LOG"; then
+        PASS=0
+        MISSING+=("$name")
+    fi
+}
+
+# M9.0 gates (always required)
+check_gate "phase2-dhcp-oci-menu: lease acquired"                        "lease acquired"
+check_gate "phase2-dhcp-oci-menu: bootfile-name = ttl.sh/cloudboot-m90-" "bootfile-name"
+check_gate "phase2-dhcp-oci-menu: parsed BootConfig"                     "parsed BootConfig"
+check_gate "title ="                                                      "title ="
+
+# M9.2 gates (only when auto-mode is active)
+if [[ "${M9_LIVE_NOAUTO:-0}" != "1" ]]; then
+    check_gate "phase2-dhcp-oci-menu: auto-boot countdown expired"  "auto-boot countdown"
+    check_gate "phase2-dhcp-oci-menu: bootEntry: kernel_ref ="      "bootEntry kernel_ref"
+fi
 
 if [[ "$PASS" -eq 1 ]]; then
     echo "[live-dhcpocimenu:$ARCH] PASS — wall=${ELAPSED_MS}ms, ref=$OCI_REF"
     grep -E "phase2-dhcp-oci-menu:|title =|entry " "$LOG" || true
+    if [[ -s "$WORK/virtcon.log" ]]; then
+        echo "[live-dhcpocimenu:$ARCH] virtio-console capture (first 32 lines):"
+        head -32 "$WORK/virtcon.log" || true
+    fi
     exit 0
 fi
 
-echo "[live-dhcpocimenu:$ARCH] FAIL — missing one of 'lease acquired' / 'bootfile-name =' / 'parsed BootConfig' / 'title =' after ${ELAPSED_MS}ms" >&2
+echo "[live-dhcpocimenu:$ARCH] FAIL — missing gate(s): ${MISSING[*]} after ${ELAPSED_MS}ms" >&2
 echo "[live-dhcpocimenu:$ARCH] tail of qemu log (last 80 lines):" >&2
 tail -80 "$LOG" >&2 || true
+if [[ -s "$WORK/virtcon.log" ]]; then
+    echo "[live-dhcpocimenu:$ARCH] virtio-console capture (last 32 lines):" >&2
+    tail -32 "$WORK/virtcon.log" >&2 || true
+fi
 exit 1
