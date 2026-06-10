@@ -2159,6 +2159,12 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/livekernelboot/run.sh" loong64'
 
+  kernelboot:live:amd64:
+    desc: 'Live kernel boot from BOOTX64-KERNELBOOT.EFI under QEMU+EDK2 (activated 2026-06-10 post R-amd64a..i + M8.13).'
+    deps: [kernelboot:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livekernelboot/run.sh" amd64'
+
   # =====================================================================
   # M9.0 — DHCP-discovered OCI boot menu (foundation)
   # =====================================================================

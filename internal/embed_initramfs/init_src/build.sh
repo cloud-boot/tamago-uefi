@@ -31,7 +31,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
 
-ARCHES=(arm64 riscv64 loong64)
+ARCHES=(arm64 riscv64 loong64 amd64)
 
 for ARCH in "${ARCHES[@]}"; do
     echo "[$ARCH] building static ELF /init..."

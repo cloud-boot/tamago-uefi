@@ -84,8 +84,31 @@ case "$ARCH" in
         FW_VARS="${CLOUDBOOT_OVMF_LOONG64_VARS:-$FW_VARS_DEFAULT}"
         BANNER_ARCH="loong64"
         ;;
+    amd64)
+        # Activated 2026-06-10 after R-amd64a..i saga closure + M8.13
+        # Debian 13 unification. amd64 now boots from the same Debian
+        # 6.12.90+deb13.1 kernel base as the other three arches —
+        # `ttl.sh/cloudboot-vmlinuz-amd64:24h` per kernelboot_amd64.go.
+        EFI_NAME="BOOTX64-KERNELBOOT.EFI"
+        EFI_BOOT_NAME="BOOTX64.EFI"
+        QEMU_BIN="qemu-system-x86_64"
+        # Prefer patched OVMF (edk2-stable202605 from Fedora koji,
+        # installed by the M6.1 sprint). Falls back to pkgx-bundled
+        # buggy blob if not installed — fallback will reproduce the
+        # original CpuPageTableLib #GP and lose the run.
+        if [[ -f "$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-x86_64-code.fd" ]]; then
+            FW_CODE_DEFAULT="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-x86_64-code.fd"
+            FW_VARS_DEFAULT="$HOME/.pkgx/tianocore.org/v0.0.0-stable202605/share/qemu/edk2-i386-vars.fd"
+        else
+            FW_CODE_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-x86_64-code.fd"
+            FW_VARS_DEFAULT="$HOME/.pkgx/qemu.org/v9.2.0/share/qemu/edk2-i386-vars.fd"
+        fi
+        FW_CODE="${CLOUDBOOT_OVMF_AMD64_CODE:-$FW_CODE_DEFAULT}"
+        FW_VARS="${CLOUDBOOT_OVMF_AMD64_VARS:-$FW_VARS_DEFAULT}"
+        BANNER_ARCH="amd64"
+        ;;
     *)
-        echo "unsupported arch: $ARCH (M8.1 minimal supports arm64/riscv64/loong64; amd64 deferred)" >&2
+        echo "unsupported arch: $ARCH (supports arm64/riscv64/loong64/amd64)" >&2
         exit 2
         ;;
 esac
@@ -204,6 +227,25 @@ case "$ARCH" in
             -netdev "user,id=n0"
             -device "virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off"
             -serial stdio
+        )
+        ;;
+    amd64)
+        # Activated 2026-06-10 (M8.13). Mirrors the amd64 efipack-smoke
+        # invocation: q35, pflash split (code + vars), ide-hd for ESP,
+        # virtio-net for the OCI fetch. cpu=max enables every feature
+        # QEMU 9.2.0 exposes — Debian 13's 6.12 kernel gates everything.
+        cp "$FW_VARS" "$WORK/vars.fd"
+        QEMU_ARGS=(
+            -machine q35 -cpu max -m 4096
+            -display none -no-reboot
+            -drive "if=pflash,format=raw,readonly=on,file=$FW_CODE"
+            -drive "if=pflash,format=raw,file=$WORK/vars.fd"
+            -drive "file=$ESP,format=raw,if=none,id=esp,media=disk"
+            -device "ide-hd,drive=esp"
+            -netdev "user,id=n0"
+            -device "virtio-net-pci,netdev=n0,bus=pcie.0,addr=03.0,disable-legacy=on,disable-modern=off"
+            -chardev "stdio,id=char0,mux=off,signal=off"
+            -serial "chardev:char0"
         )
         ;;
 esac

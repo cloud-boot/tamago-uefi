@@ -1,7 +1,7 @@
 // Copyright 2026 The cloud-boot Authors.
 // SPDX-License-Identifier: BSD-3-Clause
 
-//go:build !arm64 && !riscv64 && !loong64
+//go:build !arm64 && !riscv64 && !loong64 && !amd64
 
 package embed_initramfs
 
