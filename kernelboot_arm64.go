@@ -64,6 +64,61 @@
 // EFI_RNG_PROTOCOL (GUID 3152bca5-eade-433d-862e-c01cdc291f44)
 // backed by crypto/rand so the FIRST call succeeds and no retry
 // happens. Approach C is upstream-Linux investigation.
+//
+// M8.8 post-EBS serial routing — cmdline cleanup + new pre-EBS
+// crash uncovered (2026-06-10)
+//
+// After M8.7 the EFI-stub trace ended cleanly on
+// "Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path"
+// followed by ~180s silence to the watchdog (treated as PASS by
+// the existing runner gates). M8.8 investigation: ran the live
+// test with M81_LIVE_KEEPRUN=1 and inspected the full qemu log
+// past the runner's "kernel-side output" marker. Found:
+//
+//   Synchronous Exception at 0x000000013C0FF9DC
+//   ESR 0x96000047  FAR 0x0000000000000040
+//   ASSERT [ArmCpuDxe] DefaultExceptionHandler.c(343): 0==1
+//
+// FAR=0x40 + ESR=0x96000047 = Translation fault, third level (a
+// null+0x40 deref). ELR lands inside the EDK2 DXE region, so the
+// fault fires WHILE EDK2 boot services are still active — i.e.
+// the kernel/EFI-stub is calling into a firmware service that
+// dereferences a null string or struct pointer at offset 0x40.
+// This is therefore PRE-ExitBootServices: zero kernel `[ x.xxx]`
+// output ever reaches the PL011 because the kernel never actually
+// transitions to its own console subsystem.
+//
+// QEMU side: `-serial stdio` IS routing PL011 to the runner — the
+// EFI-stub's 4 lines reach us cleanly, proving the chardev path
+// works. The blocker is 100% kernel↔firmware: a new pre-EBS Data
+// Abort tracked as R-M8.8a (different LR than M8.6a's RngDxe;
+// PublishRNG already neutralised the firmware's RngDxe handle).
+//
+// Cmdline cleanup landed in M8.8 (these stay even though they
+// don't unblock R-M8.8a — they're correct on their own merits and
+// will let post-EBS output flow the moment R-M8.8a is unblocked
+// in M8.9):
+//   - drop `acpi=force`: M8.6 PublishDTB now installs a proper
+//     QEMU-virt DTB under EFI_DTB_TABLE_GUID with pl011@9000000 +
+//     serial0 alias + chosen/stdout-path; with BOTH `acpi=force`
+//     AND a DTB present the kernel was picking ACPI (EDK2's
+//     MADT/GTDT has no PL011 UART description) — so even if the
+//     pre-EBS crash were fixed, the late console hand-off from
+//     earlycon to ttyAMA0 would silently never initialise. Drop
+//     the override; kernel auto-picks DTB when present;
+//   - add `keep_bootcon`: keep earlycon alive until ttyAMA0 is
+//     fully registered;
+//   - add `earlyprintk=keep`: symmetry for kernels that gate on
+//     `earlyprintk` instead of (or in addition to) `earlycon`;
+//   - add `printk.time=y`: kernel `[ x.xxx]` timestamp prefix.
+//
+// R-M8.8a (NEW, OPEN — queued for M8.9): pre-EBS Data Abort
+// during what appears to be a kernel→firmware string/struct
+// callback. Likely candidates: efi_random_alloc for kernel image
+// relocation (calls firmware RNG indirectly), efi_get_memory_map
+// walk over a partially-uninstalled handle, or a runtime services
+// install path. Reproduce via `M81_LIVE_KEEPRUN=1 task
+// kernelboot:live:arm64` then inspect `$WORK/qemu.log`.
 
 //go:build phase2_oci_kernel_boot && tamago && arm64
 
@@ -72,8 +127,8 @@ package main
 var (
 	kernelBootTargetRef = "https://ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc"
 	kernelBootCmdline   = "console=ttyAMA0,115200 " +
-		"earlycon=pl011,mmio32,0x9000000 " +
-		"acpi=force " +
+		"earlycon=pl011,mmio32,0x9000000 keep_bootcon earlyprintk=keep " +
+		"printk.time=y " +
 		"root=/dev/ram0 rdinit=/init " +
 		"loglevel=8 panic=10 " +
 		"nokaslr random.trust_bootloader=0 random.trust_cpu=0"
