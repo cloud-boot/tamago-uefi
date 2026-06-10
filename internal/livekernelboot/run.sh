@@ -235,6 +235,16 @@ case "$ARCH" in
         # (loong64 — its EFI-stub is quieter). Either is acceptable
         # proof the OCI-streamed kernel ran.
         grep -qE "(EFI stub: Booting Linux Kernel|Linux version )" "$LOG" || PASS=0
+        # M8.6 additions (arm64 only — closes R-M8.5a):
+        # PublishDTB installs the embedded arm64-virt DTB via
+        # gBS->InstallConfigurationTable. The Linux EFI-stub then
+        # picks it up via "Using DTB from configuration table".
+        # Without this the empty-DTB fallback null-derefs on EDK2
+        # arm64 (which publishes ACPI + SMBIOS but no DTB).
+        if [[ "$ARCH" == "arm64" ]]; then
+            grep -q "phase2-oci-kernel-boot: DTB published" "$LOG" || PASS=0
+            grep -q "EFI stub: Using DTB from configuration table" "$LOG" || PASS=0
+        fi
         ;;
     *)
         # Other arches stay on MODE B self-test (chainedhello payload).

@@ -679,6 +679,54 @@ func runKernelBootLinuxKernel() {
 	}
 	println("phase2-oci-kernel-boot: vmlinuz PE header OK (MZ)")
 
+	// M8.6: publish a DTB via gBS->InstallConfigurationTable BEFORE
+	// LoadImage. Closes R-M8.5a (DTB-absence Data Abort) on EDK2
+	// arm64, which publishes ACPI + SMBIOS but NOT the DTB; the
+	// Linux EFI-stub's empty-DTB fallback path null-derefs (FAR=0x40)
+	// and the kernel never starts. Publishing a DTB ourselves lets
+	// the EFI-stub's normal devicetree path take over.
+	//
+	// Source priority:
+	//   1. Live fw_cfg read via FetchQemuDTB — the "right" path,
+	//      but EDK2 doesn't map the fw_cfg MMIO window on arm64
+	//      virt so this faults until a future M8.x adds the
+	//      AddMemorySpace plumbing (see uefiboard/embed_dtb_arm64.go
+	//      docstring for the full diagnosis). Kept as the primary
+	//      attempt so a firmware update that fixes the mapping is
+	//      auto-picked up.
+	//   2. Embedded baked-in QEMU arm64 virt DTB (EmbeddedArm64VirtDTB) —
+	//      the M8.6 fallback. Trimmed DTB generated once at build
+	//      time via `qemu-system-aarch64 -M virt,dumpdtb=...`;
+	//      content stable across QEMU versions for this board.
+	//
+	// On amd64 + loong64 + riscv64 both sources return empty and
+	// we skip the publish — those targets use ACPI exclusively
+	// (amd64) or aren't on the M8.6 critical path (the others).
+	var publishedDTB []byte
+	fwCfgDTB, fetchErr := uefiboard.FetchQemuDTB()
+	if fetchErr == nil && len(fwCfgDTB) > 0 {
+		println("phase2-oci-kernel-boot: FetchQemuDTB OK; bytes =", len(fwCfgDTB))
+		publishedDTB = fwCfgDTB
+	} else {
+		if fetchErr != nil {
+			println("phase2-oci-kernel-boot: FetchQemuDTB:", fetchErr.Error())
+		}
+		embedded := uefiboard.EmbeddedArm64VirtDTB()
+		if len(embedded) > 0 {
+			println("phase2-oci-kernel-boot: using embedded arm64-virt DTB; bytes =", len(embedded))
+			publishedDTB = embedded
+		}
+	}
+	if len(publishedDTB) > 0 {
+		if perr := uefiboard.PublishDTB(publishedDTB); perr != nil {
+			println("phase2-oci-kernel-boot: PublishDTB failed:", perr.Error())
+		} else {
+			println("phase2-oci-kernel-boot: DTB published (", len(publishedDTB), "bytes)")
+		}
+	} else {
+		println("phase2-oci-kernel-boot: no DTB source available; falling through (kernel may fault)")
+	}
+
 	// LoadImage the kernel bytes. EDK2 parses the PE32+ header and
 	// allocates code/data pages; the EFI-stub entry point becomes
 	// the StartImage target.
