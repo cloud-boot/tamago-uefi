@@ -30,15 +30,56 @@ import (
 // CPU is this board's processor instance (timer/RNG/feature state).
 var CPU = &amd64.CPU{}
 
-// heapReserveSize is the .bss-backed heap reservation: 128 MiB. The
+// heapReserveSize is the .bss-backed heap reservation: 256 MiB. The
 // linker emits this as zero-initialised .bss (no raw bytes in the PE
 // on-disk; only SizeOfImage grows), so the file size is unchanged.
-// 128 MiB matches the arm64 board's ramSize, which is sized for the
-// M8.3 Linux-EFI-stub kernel-boot path (the synchronous gunzip+tar
-// extract holds vmlinuz uncompressed and the gzipped layer
-// simultaneously, ~75 MiB working set). Page-aligned at use site by
-// cpuinit_amd64.s; the +4096 slack accommodates the round-up.
-const heapReserveSize = 0x08000000 // 128 MiB
+// Page-aligned at use site by cpuinit_amd64.s; the +4096 slack
+// accommodates the round-up.
+//
+// R-amd64h (2026-06-10): bumped from 128 MiB to 256 MiB. Headroom
+// for the HTTPS / OCI cells, paired with the rxLoop idle-yield fix
+// in ministack/stack.go (rxLoopIdleSleep). Diagnosis (pcap + Go
+// runtime OOM trace):
+//
+//   - HTTP (port 80, ~1 s end-to-end): PASSed at 128 MiB. The
+//     inline-pump path in dialTCP4Once returns on the SYN-ACK fast
+//     enough that the rxLoop goroutine's per-RecvFrame allocation
+//     leak (go-virtio/net's `commonNetError` string-typed sentinel
+//     boxed to `error` on every poll = 16 byte mallocgc per call)
+//     doesn't accumulate.
+//
+//   - HTTPS (port 443, ~30 s wall clock): FAILed at 128 MiB with
+//     `out of memory: cannot allocate 4194304-byte block (117276672
+//     in use)`. The DialTLSWithRetry path holds the inline pump in
+//     dialTCP4Once for the full per-attempt timeout × 3 attempts; on
+//     amd64 the runtime now does hardware-timer-driven async
+//     preemption (it didn't when arm64/riscv64/loong64 were brought
+//     up — those archs leave the rxLoop goroutine permanently
+//     parked), so the rxLoop competes for RecvFrame calls at full
+//     CPU and the boxing leak rate hits MB/s. pcap-confirmed: ZERO
+//     port-443 packets reached the wire because the OOM throw fired
+//     BEFORE the SYN was emitted. Bumping the heap to 256 MiB +
+//     adding a 1 µs idle sleep in rxLoop drops the leak rate by
+//     ~3 orders of magnitude AND raises the ceiling above the worst-
+//     case 30-second dial-budget allocation footprint, so the SYN
+//     fires, SYN-ACK lands, and the TLS handshake completes.
+//
+//   - Why arm64 / riscv64 / loong64 don't hit it at 128 MiB: their
+//     tamago runtime does not yet emit async-preemption signals from
+//     the EDK2 timer, so the rxLoop goroutine is never scheduled.
+//     Only the inline pump runs, and it stays inside its own
+//     bounded poll window. amd64's recent preemption rollout
+//     unlocked the latent rxLoop leak.
+//
+// 256 MiB grows the on-disk PE only via SizeOfImage (.bss is zero
+// on disk — SizeOfRawData unchanged); BOOTX64-HTTPS.EFI does not
+// grow. EDK2 LoadImage's AllocatePages(SizeOfImage) on QEMU+EDK2
+// `-m 2048` finds the 256 MiB block with ~1.7 GiB of free Boot
+// Services memory to spare. The long-term fix is upstream
+// go-virtio/net switching to a pre-boxed `error` sentinel; until
+// that ships, the rxLoop yield + this headroom bump together close
+// the gap.
+const heapReserveSize = 0x10000000 // 256 MiB
 
 // heapReserve is the firmware-allocated, RW, mapped region that backs
 // goos.RamStart/RamSize/SP. cpuinit_amd64.s references it as

@@ -178,8 +178,30 @@ func (s *Stack) Close() {
 	})
 }
 
+// rxLoopIdleSleep is the back-off the rxLoop sleeps when RecvFrame
+// returns ErrReceiveTimeout (no frame in the budget window). On the
+// three arches whose tamago runtime lacks hardware-timer-driven async
+// preemption (arm64/riscv64/loong64 as of 2026-06-10), this goroutine
+// is never scheduled at all and the inline RX pump in dialTCP4Once /
+// resolveARP / PingOnce / ReadFrom is the authoritative receiver;
+// the sleep is a no-op there. On amd64 (where async preemption now
+// works) this loop IS scheduled and competes with the inline pump
+// for RecvFrame calls — the per-call interface-boxing of
+// go-virtio/net's `commonNetError` ErrReceiveTimeout sentinel
+// (string-typed error → `error` interface = 16-byte mallocgc per
+// return) accumulates at MB/sec, exhausting the heap mid-TLS-dial
+// (R-amd64h, 2026-06-10). A short sleep yields the OS-thread back to
+// the runtime, lets GC catch up, and amortises the leak rate by ~3
+// orders of magnitude (1 µs / poll → 256 polls/ms vs no-sleep tight
+// loop at ~MHz). 1 µs is short enough that latency-sensitive RX still
+// flows through the inline pump (which has zero sleep) but long
+// enough to break the leak.
+const rxLoopIdleSleep = 1 * time.Microsecond
+
 // rxLoop is the RX goroutine body. Loops on link.RecvFrame; dispatches
-// each frame by EtherType. Exits when Close is called.
+// each frame by EtherType. Exits when Close is called. Yields on
+// idle (no-frame) iterations to bound the allocation pressure from
+// go-virtio/net's string-typed error sentinel — see rxLoopIdleSleep.
 func (s *Stack) rxLoop() {
 	defer close(s.doneCh)
 	for {
@@ -191,15 +213,11 @@ func (s *Stack) rxLoop() {
 		frame, err := s.link.RecvFrame()
 		if err != nil {
 			// Most common error is the link's receive-timeout
-			// (no frame in the budget window). Loop back. Other
-			// transient errors are equally fine.
-			//
-			// NOTE: under tamago+UEFI this goroutine has been
-			// observed to never get scheduled because the runtime
-			// lacks hardware-timer-driven async preemption. The
-			// authoritative RX path is the inline pump in
-			// resolveARP / PingOnce; this loop is kept as a safety
-			// net for environments where async preemption works.
+			// (no frame in the budget window). Loop back after a
+			// short yield. The inline pump in dialTCP4Once /
+			// ResolveA / PingOnce / UDP4Conn.ReadFrom is the
+			// authoritative receiver; this loop is the safety net.
+			time.Sleep(rxLoopIdleSleep)
 			continue
 		}
 		_ = s.dispatch(frame)
