@@ -39,16 +39,25 @@ import (
 
 // EFI_BOOT_SERVICES offsets we need beyond what's already in
 // efi_events.go + initrd_protocol.go + rng_protocol.go. From
-// MdePkg/Include/Uefi/UefiSpec.h:
+// MdePkg/Include/Uefi/UefiSpec.h (verified against UEFI 2.10 §4.2,
+// table 4.2 "EFI Boot Services Table"):
 //
 //	128 InstallProtocolInterface             (already in rng_protocol.go)
-//	304 ConnectController                    <-- new
+//	264 ConnectController                    <-- new (NOT 304! 304 is ProtocolsPerHandle)
+//	272 DisconnectController
 //	312 LocateHandleBuffer                   (already in efi_events.go)
 //	320 LocateProtocol                       (already in efi_events.go)
 //	328 InstallMultipleProtocolInterfaces    (already in initrd_protocol.go)
 //	336 UninstallMultipleProtocolInterfaces  (already in initrd_protocol.go)
+//
+// Sprint 1.1 footnote: the original sprint-1 commit had this at 304
+// (i.e. pointing at ProtocolsPerHandle). The off-by-five blew up
+// ConnectController with EFI_INVALID_PARAMETER (status 0x8...02)
+// because ProtocolsPerHandle's (Handle, ProtocolBuffer**,
+// ProtocolBufferCount*) shape doesn't accept our (Handle, NULL, NULL,
+// Recursive) args. Live test confirmed; offset corrected here.
 const (
-	efiBSConnectController = 304
+	efiBSConnectController = 264
 )
 
 // EFISimpleFileSystemProtocolGUID + EFIBlockIOProtocolPublished are
@@ -58,15 +67,60 @@ const (
 // closure in.
 
 // blockIOPublishState holds the per-publish backing memory. The
-// firmware retains pointers into protocol + media for the lifetime of
-// the installed handle, so we keep typed Go references to keep the
-// GC away.
+// firmware retains pointers into protocol + media + devicePath for
+// the lifetime of the installed handle, so we keep typed Go
+// references to keep the GC away.
 type blockIOPublishState struct {
-	protocol *EFIBlockIOProtocolPublished
-	media    *EFIBlockIOMedia
-	body     []byte
-	slot     int
-	handle   uint64 // firmware-assigned BlockIO controller handle
+	protocol   *EFIBlockIOProtocolPublished
+	media      *EFIBlockIOMedia
+	body       []byte
+	devicePath []byte
+	slot       int
+	handle     uint64 // firmware-assigned BlockIO controller handle
+}
+
+// blockIOPublishMediaGUID is the Vendor-Defined Media Device Path GUID
+// we slap onto the synthetic Block IO handle so PartitionDxe's
+// driver-binding Supported() callback (which OpenProtocol's
+// EFI_DEVICE_PATH_PROTOCOL_GUID) finds something concrete. Any unique
+// GUID works — this one was generated randomly and is reserved for
+// cloud-boot's synthetic block-IO publish path.
+//
+//	c10ddb00-7e1a-4001-91b0-070cb1ec80b1
+//
+// (Chosen specifically so we can fingerprint our own published
+// handle by its DevicePath GUID — a quick alternative to the
+// parent-prefix walk if a sub-component ever needs to identify
+// "is this one of mine?".)
+var blockIOPublishMediaGUID = EFIGUID{
+	Data1: 0xc10ddb00,
+	Data2: 0x7e1a,
+	Data3: 0x4001,
+	Data4: [8]uint8{0x91, 0xb0, 0x07, 0x0c, 0xb1, 0xec, 0x80, 0xb1},
+}
+
+// buildBlockIOPublishDevicePath returns a 24-byte vendor-defined
+// media device path + END node, byte-formatted per UEFI 2.10 §10.3.5.3:
+//
+//	Type    = 0x04 (MEDIA_DEVICE_PATH)
+//	SubType = 0x03 (MEDIA_VENDOR_DP)
+//	Length  = 0x14 (20 LE)
+//	Guid    = blockIOPublishMediaGUID
+//	+ END node (4 bytes).
+func buildBlockIOPublishDevicePath() []byte {
+	out := make([]byte, 0, 24)
+	out = append(out, devPathTypeMedia, devPathSubTypeVendor)
+	out = append(out, 0x14, 0x00)
+	g := blockIOPublishMediaGUID
+	out = append(out,
+		byte(g.Data1), byte(g.Data1>>8), byte(g.Data1>>16), byte(g.Data1>>24),
+		byte(g.Data2), byte(g.Data2>>8),
+		byte(g.Data3), byte(g.Data3>>8),
+	)
+	out = append(out, g.Data4[:]...)
+	out = append(out, devPathTypeEnd, devPathSubTypeEndWhole)
+	out = append(out, 0x04, 0x00)
+	return out
 }
 
 // publishedBlockIOs tracks active PublishBlockIO installs so
@@ -176,36 +230,36 @@ func PublishBlockIO(image []byte) (uintptr, error) {
 		mediaKeepAlive: media,
 	}
 
-	// gBS->InstallProtocolInterface(IN OUT EFI_HANDLE *Handle,
-	//                               IN EFI_GUID *Protocol,
-	//                               IN EFI_INTERFACE_TYPE InterfaceType,  (always EFI_NATIVE_INTERFACE=0)
-	//                               IN VOID *Interface);
-	//
-	// With *Handle = NULL on entry the firmware allocates a fresh
-	// handle. Using InstallProtocolInterface (not the multi variant)
-	// because we install exactly one protocol; the simpler API path
-	// avoids the variadic NULL-terminator footgun.
+	// Per UEFI 2.10 §7.3.12 + EDK2 PartitionDxe driver-binding
+	// (MdeModulePkg/Universal/Disk/PartitionDxe/Partition.c
+	// PartitionDriverBindingSupported), the binding requires BOTH
+	// EFI_BLOCK_IO_PROTOCOL and EFI_DEVICE_PATH_PROTOCOL on the
+	// controller handle. Without the latter ConnectController returns
+	// EFI_INVALID_PARAMETER (status 0x80...02). So we install both via
+	// InstallMultipleProtocolInterfaces on the same handle.
+	devicePath := buildBlockIOPublishDevicePath()
 	var handle uint64
 	status := efiCall(
-		bs+efiBSInstallProtocolInterface,
+		bs+efiBSInstallMultipleProtocolInterfaces,
 		uint64(uintptr(unsafe.Pointer(&handle))),
+		uint64(uintptr(unsafe.Pointer(&EFIDevicePathProtocolGUID))),
+		uint64(uintptr(unsafe.Pointer(&devicePath[0]))),
 		uint64(uintptr(unsafe.Pointer(&EFIBlockIOProtocolGUID))),
-		0, // EFI_NATIVE_INTERFACE
 		uint64(uintptr(unsafe.Pointer(protocol))),
-		0,
-		0,
+		0, // NULL terminator
 	)
 	if status != efiSuccess {
 		blockIOPublishRegistry[slot] = blockIOPublishEntry{}
-		return 0, &EFIError{Status: status, Op: "InstallProtocolInterface(BlockIO)"}
+		return 0, &EFIError{Status: status, Op: "InstallMultipleProtocolInterfaces(BlockIO+DevicePath)"}
 	}
 
 	publishedBlockIOs[uintptr(handle)] = &blockIOPublishState{
-		protocol: protocol,
-		media:    media,
-		body:     body,
-		slot:     slot,
-		handle:   handle,
+		protocol:   protocol,
+		media:      media,
+		body:       body,
+		devicePath: devicePath,
+		slot:       slot,
+		handle:     handle,
 	}
 	return uintptr(handle), nil
 }
@@ -226,17 +280,19 @@ func UnpublishBlockIO(handle uintptr) error {
 	if bs == 0 {
 		return ErrNoBootServices
 	}
+	// Mirror PublishBlockIO's install pair order; the firmware
+	// matches pointers exactly (UEFI 2.10 §7.3.14).
 	status := efiCall(
 		bs+efiBSUninstallMultipleProtocolInterfaces,
 		uint64(handle),
+		uint64(uintptr(unsafe.Pointer(&EFIDevicePathProtocolGUID))),
+		uint64(uintptr(unsafe.Pointer(&state.devicePath[0]))),
 		uint64(uintptr(unsafe.Pointer(&EFIBlockIOProtocolGUID))),
 		uint64(uintptr(unsafe.Pointer(state.protocol))),
 		0, // NULL terminator
-		0,
-		0,
 	)
 	if status != efiSuccess {
-		return &EFIError{Status: status, Op: "UninstallMultipleProtocolInterfaces(BlockIO)"}
+		return &EFIError{Status: status, Op: "UninstallMultipleProtocolInterfaces(BlockIO+DevicePath)"}
 	}
 	if state.slot >= 0 && state.slot < blockIOPublishRegistrySize {
 		blockIOPublishRegistry[state.slot] = blockIOPublishEntry{}

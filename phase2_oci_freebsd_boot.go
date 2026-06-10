@@ -213,29 +213,63 @@ func runOCIFreeBSDBootProbe() {
 	}
 	println("phase3-oci-freebsd-boot: ConnectController OK (DiskIo/PartitionDxe/FatDxe binding done)")
 
-	// Find the SimpleFileSystem child handle published by FatDxe on the
-	// FAT ESP partition. After ConnectController, firmware should
-	// surface at least one SFS handle.
+	// Diagnostic: count every SFS handle the firmware sees, then filter
+	// to the one whose backing storage is our Block IO. The sprint-1
+	// brief explicitly called the unfiltered LocateHandleBuffer a
+	// known sprint-1.1 hazard — OVMF connects ALL block devices on
+	// boot, so a blind lookup returns the stock startup FAT alongside
+	// ours.
 	sfsHandles, lerr := uefiboard.LocateHandleBuffer(&uefiboard.EFISimpleFileSystemProtocolGUID)
 	if lerr != nil {
 		println("phase3-oci-freebsd-boot: FREEBSD-BOOT FAIL: LocateHandleBuffer(SFS):", lerr.Error())
 		return
 	}
-	println("phase3-oci-freebsd-boot: LocateHandleBuffer(SFS) found", len(sfsHandles), "handle(s)")
+	println("phase3-oci-freebsd-boot: LocateHandleBuffer(SFS) found", len(sfsHandles), "total handle(s) (parent + siblings)")
 	if len(sfsHandles) == 0 {
 		println("phase3-oci-freebsd-boot: FREEBSD-BOOT FAIL: firmware did not surface any SimpleFileSystem handle after ConnectController -- ESP probably not recognised")
 		return
 	}
 
-	// Sprint 1 MVP: we have proven the publish + bind + SFS-discovery
-	// chain. Sprint 1.1 will pick the SFS handle whose backing block
-	// device matches `blkHandle` (filtering by EFI_DEVICE_PATH parent)
-	// and LoadImage \EFI\BOOT\BOOTX64.EFI from it.
-	println("phase3-oci-freebsd-boot: FREEBSD-BOOT MVP CHAIN COMPLETE -- publish + connect + SFS-discovery PROVEN")
-	println("phase3-oci-freebsd-boot: Sprint 1.1 next: filter SFS by parent device path, LoadImage", freebsdBootEFIPath)
-	println("phase3-oci-freebsd-boot: Sprint 2 next: ufs filesystem support (so loader.efi can find kernel)")
+	// Filter to the SFS handle whose device path begins with our
+	// blkHandle's device path. See sfs_filter_tamago.go for the walk
+	// logic; the bytes-level node-aligned prefix match is unit-tested
+	// in sfs_filter_test.go.
+	childHandle, childDP, ferr := uefiboard.FindSFSChildOf(blkHandle)
+	if ferr != nil {
+		println("phase3-oci-freebsd-boot: FREEBSD-BOOT FAIL: FindSFSChildOf:", ferr.Error())
+		return
+	}
+	println("phase3-oci-freebsd-boot: matching SFS child handle =", hexUintptrFreeBSD(uintptr(childHandle)))
+	println("phase3-oci-freebsd-boot: child device path length =", len(childDP), "bytes")
 
-	// Best-effort cleanup so we don't strand the registry slot.
+	// LoadImage \EFI\BOOT\BOOTX64.EFI from the matched SFS. We use the
+	// device-path form (NULL SourceBuffer) so the firmware sets the
+	// child image's EFI_LOADED_IMAGE.DeviceHandle to our SFS child —
+	// FreeBSD's loader.efi keys its filesystem reads off DeviceHandle
+	// and would otherwise fail with "Failed to find bootable partition"
+	// the way it does when handed a memory-loaded image.
+	childImage, lerr2 := uefiboard.LoadImageFromSFS(childDP, freebsdBootEFIPath)
+	if lerr2 != nil {
+		println("phase3-oci-freebsd-boot: FREEBSD-BOOT FAIL: LoadImageFromSFS:", lerr2.Error())
+		return
+	}
+	println("phase3-oci-freebsd-boot: LoadImage(", freebsdBootEFIPath, ") OK; image handle =", hexUintptrFreeBSD(childImage))
+
+	// Sprint 1.1 PASS gate: reach this point and StartImage. The
+	// FreeBSD loader.efi will print its banner ("FreeBSD/amd64 EFI
+	// loader, Revision 3.0") and then either find a kernel + boot it
+	// (sprint 2's UFS support — out of scope here) or fail with
+	// "Failed to find bootable partition" (expected, ESP only).
+	println("phase3-oci-freebsd-boot: FREEBSD-BOOT CHAIN COMPLETE -- transferring control to loader.efi")
+	if _, serr := uefiboard.StartImage(childImage); serr != nil {
+		println("phase3-oci-freebsd-boot: StartImage returned:", serr.Error(), "-- loader.efi exited (sprint-2 UFS will let it boot a kernel)")
+	} else {
+		println("phase3-oci-freebsd-boot: StartImage returned EFI_SUCCESS -- loader.efi clean exit")
+	}
+
+	// Best-effort cleanup so we don't strand the registry slot. May
+	// fail if firmware is mid-binding when loader.efi returned — log
+	// only.
 	if uerr := uefiboard.UnpublishBlockIO(blkHandle); uerr != nil {
 		println("phase3-oci-freebsd-boot: UnpublishBlockIO warning:", uerr.Error())
 	}

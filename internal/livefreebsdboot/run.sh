@@ -56,25 +56,69 @@ fi
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TIMEOUT_SECONDS="${FREEBSD_LIVE_TIMEOUT:-240}"
 
-# 1) Locate the FreeBSD image.
+# 1) Locate the FreeBSD source image. Sprint 1.1 finding: the 412 MiB
+#    bootonly ISO does NOT fit in tamago's 256 MiB heap reservation
+#    (board_amd64.go heapReserveSize), so streaming it OOMs the runtime
+#    during the OCI fetch. Pivot: extract /boot/loader.efi from the ISO
+#    and synthesise a minimal (~16 MiB) GPT+FAT16 ESP image carrying
+#    just \EFI\BOOT\BOOTX64.EFI. The probe still proves the publish +
+#    ConnectController + SFS-discovery + SFS-parent-filter +
+#    LoadImage(loader.efi) chain end-to-end; loader.efi itself fails
+#    later at the "find a bootable partition" step because the image
+#    has no UFS rootfs — sprint 2 lands UFS via go-filesystems/ufs.
 DEFAULT_IMG_PATHS=(
     "$HOME/Downloads/FreeBSD-14.3-RELEASE-amd64-bootonly.iso"
     "/tmp/fbsd/FreeBSD-14.3-RELEASE-amd64-bootonly.iso"
     "$HOME/Downloads/FreeBSD-14.2-RELEASE-amd64-bootonly.iso"
 )
-IMG_PATH="${CLOUDBOOT_FREEBSD_IMAGE:-}"
-if [[ -z "$IMG_PATH" ]]; then
+SRC_PATH="${CLOUDBOOT_FREEBSD_IMAGE:-}"
+if [[ -z "$SRC_PATH" ]]; then
     for cand in "${DEFAULT_IMG_PATHS[@]}"; do
-        if [[ -f "$cand" ]]; then IMG_PATH="$cand"; break; fi
+        if [[ -f "$cand" ]]; then SRC_PATH="$cand"; break; fi
     done
 fi
-if [[ -z "$IMG_PATH" || ! -f "$IMG_PATH" ]]; then
+if [[ -z "$SRC_PATH" || ! -f "$SRC_PATH" ]]; then
     echo "[live-freebsdboot] no FreeBSD image found; set CLOUDBOOT_FREEBSD_IMAGE or download to one of:" >&2
     for cand in "${DEFAULT_IMG_PATHS[@]}"; do echo "    $cand" >&2; done
     echo "    curl -fL -o /tmp/fbsd/FreeBSD-14.3-RELEASE-amd64-bootonly.iso https://download.freebsd.org/releases/amd64/amd64/ISO-IMAGES/14.3/FreeBSD-14.3-RELEASE-amd64-bootonly.iso" >&2
     exit 1
 fi
-echo "[live-freebsdboot:$ARCH] FreeBSD image: $IMG_PATH" >&2
+echo "[live-freebsdboot:$ARCH] FreeBSD source image: $SRC_PATH" >&2
+
+WORK_PRE="$(mktemp -d -t cloudboot-freebsd-pre-XXXXXX)"
+trap 'rm -rf "$WORK_PRE"' EXIT
+
+# 1a) Mint a minimal ESP-only disk image:
+#       PMBR + GPT + single 16 MiB FAT16 partition
+#       contents: \EFI\BOOT\BOOTX64.EFI = FreeBSD loader.efi
+#
+#     - xorriso pulls /boot/loader.efi from the FreeBSD source ISO.
+#     - mformat (mtools) makes the 16 MiB FAT16 image. NB: 16 MiB +
+#       no `-F` makes mtools pick FAT16. Empirically OVMF stable202605
+#       did NOT load FreeBSD's loader.efi off a 32 MiB FAT32 ESP
+#       (BdsDxe "Not Found"); FAT16 worked first try.
+#     - buildespimg (Go helper in this dir) wraps the FAT in PMBR + GPT.
+IMG_PATH="$WORK_PRE/disk.img"
+if [[ "${CLOUDBOOT_FREEBSD_DISK_PREBUILT:-}" == "1" && -f "${CLOUDBOOT_FREEBSD_DISK:-}" ]]; then
+    IMG_PATH="$CLOUDBOOT_FREEBSD_DISK"
+    echo "[live-freebsdboot:$ARCH] using pre-built disk image: $IMG_PATH" >&2
+else
+    echo "[live-freebsdboot:$ARCH] extracting /boot/loader.efi from $SRC_PATH" >&2
+    xorriso -osirrox on -indev "$SRC_PATH" -extract /boot/loader.efi "$WORK_PRE/loader.efi" 2>&1 | tail -3 >&2
+    [[ -f "$WORK_PRE/loader.efi" ]] || { echo "[live-freebsdboot] failed to extract loader.efi from $SRC_PATH" >&2; exit 1; }
+
+    echo "[live-freebsdboot:$ARCH] building 16 MiB FAT16 ESP" >&2
+    dd if=/dev/zero of="$WORK_PRE/fat.img" bs=1m count=16 status=none
+    mformat -i "$WORK_PRE/fat.img" :: >&2
+    mmd -i "$WORK_PRE/fat.img" ::/EFI ::/EFI/BOOT >&2
+    mcopy -i "$WORK_PRE/fat.img" "$WORK_PRE/loader.efi" ::/EFI/BOOT/BOOTX64.EFI >&2
+
+    echo "[live-freebsdboot:$ARCH] wrapping FAT in PMBR + GPT via buildespimg" >&2
+    (cd "$REPO_DIR/internal/livefreebsdboot/buildespimg" && \
+        GOWORK=off go run . -fat "$WORK_PRE/fat.img" -out "$IMG_PATH") >&2
+    [[ -f "$IMG_PATH" ]] || { echo "[live-freebsdboot] buildespimg failed to produce $IMG_PATH" >&2; exit 1; }
+fi
+echo "[live-freebsdboot:$ARCH] disk image ready: $IMG_PATH ($(stat -f %z "$IMG_PATH" 2>/dev/null || stat -c %s "$IMG_PATH") bytes)" >&2
 
 # OVMF firmware
 EFI_NAME="BOOTX64-FREEBSDBOOT.EFI"
@@ -93,7 +137,7 @@ FW_VARS="${CLOUDBOOT_OVMF_AMD64_VARS:-$FW_VARS_DEFAULT}"
 [[ -f "$FW_VARS" ]] || { echo "missing OVMF vars at $FW_VARS (set CLOUDBOOT_OVMF_AMD64_VARS)" >&2; exit 1; }
 
 WORK="$(mktemp -d -t cloudboot-freebsd-live-XXXXXX)"
-trap 'if [[ "${FREEBSD_LIVE_KEEPRUN:-0}" != "1" ]]; then rm -rf "$WORK"; else echo "[KEEP] work dir: $WORK" >&2; fi' EXIT
+trap 'rm -rf "$WORK_PRE"; if [[ "${FREEBSD_LIVE_KEEPRUN:-0}" != "1" ]]; then rm -rf "$WORK"; else echo "[KEEP] work dir: $WORK" >&2; fi' EXIT
 
 # 2) Push image to ttl.sh first.
 RAND="$(dd if=/dev/urandom bs=64 count=1 2>/dev/null | LC_ALL=C tr -dc 'a-z0-9' | cut -c1-8)"
@@ -167,14 +211,18 @@ check_gate() {
     fi
 }
 
-# Sprint 1 MVP gates
+# Sprint 1.1 PASS gates — full chain to FreeBSD loader.efi banner.
 check_gate "phase3-oci-freebsd-boot: lease acquired"                          "lease acquired"
 check_gate "phase3-oci-freebsd-boot: streamed .*SHA-256 verified OK"          "image streamed + verified"
 check_gate "phase3-oci-freebsd-boot: streamed image header OK"                "image header OK"
 check_gate "phase3-oci-freebsd-boot: PublishBlockIO OK"                       "PublishBlockIO"
 check_gate "phase3-oci-freebsd-boot: ConnectController OK"                    "ConnectController"
 check_gate "phase3-oci-freebsd-boot: LocateHandleBuffer(SFS) found"           "SFS surfaced"
-check_gate "phase3-oci-freebsd-boot: FREEBSD-BOOT MVP CHAIN COMPLETE"         "MVP complete"
+check_gate "phase3-oci-freebsd-boot: matching SFS child handle"               "SFS-parent filter"
+check_gate "phase3-oci-freebsd-boot: LoadImage.*EFI.*BOOT.*BOOTX64.EFI.* OK"  "LoadImage(loader.efi)"
+check_gate "phase3-oci-freebsd-boot: FREEBSD-BOOT CHAIN COMPLETE"             "chain complete"
+# Stretch: FreeBSD loader.efi banner reached (the real sprint-1.1 PASS).
+check_gate "FreeBSD/amd64 EFI loader"                                          "FreeBSD loader.efi banner"
 
 if [[ "$PASS" -eq 1 ]]; then
     echo "[live-freebsdboot:$ARCH] PASS — wall=${ELAPSED_MS}ms, ref=$OCI_REF"
