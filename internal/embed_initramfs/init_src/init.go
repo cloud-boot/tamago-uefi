@@ -166,12 +166,19 @@ func kernelRelease() string {
 	return utsString(u.Release[:]) + " " + utsString(u.Machine[:])
 }
 
-// utsString turns a NUL-terminated int8 array (the field type of
-// syscall.Utsname on arm64 Linux) into a Go string. The conversion
-// is byte-by-byte because the array element type is platform-
-// dependent (int8 on some archs, uint8 on others); doing a single
-// unsafe-cast would be non-portable.
-func utsString(b []int8) string {
+// utsByte is the union of element types syscall.Utsname's char
+// arrays use across Linux archs: int8 on arm64 (signed char ABI),
+// uint8 on riscv64 / loong64 / amd64 (unsigned char ABI). A
+// generic helper keeps the conversion arch-portable without an
+// unsafe-cast trick.
+type utsByte interface{ int8 | uint8 }
+
+// utsString turns a NUL-terminated char array (the field type of
+// syscall.Utsname; arch-dependent element type) into a Go string.
+// The conversion is byte-by-byte because the array element type
+// varies (int8 on arm64, uint8 on riscv64/loong64/amd64); the
+// generic constraint lets a single function handle both.
+func utsString[T utsByte](b []T) string {
 	out := make([]byte, 0, len(b))
 	for _, c := range b {
 		if c == 0 {

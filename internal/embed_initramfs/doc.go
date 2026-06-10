@@ -29,19 +29,19 @@
 // (a) /init was #!/bin/sh and no /bin/sh existed in the rootfs and
 // (b) the kernel rejects shell-script init on the populate_rootfs
 // path before it ever tries to spawn anything. M8.5 replaces the
-// fixture with a statically-linked aarch64 Go program (~1.3 MiB
-// stripped, ~570 KiB after gzip) that prints a marker line on
-// /dev/console + /dev/kmsg + stdout, then powers off cleanly via
-// reboot(2) LINUX_REBOOT_CMD_POWER_OFF. This is the smallest
-// /init the kernel will actually exec end-to-end.
+// fixture with a statically-linked Go program (~1.3 MiB stripped,
+// ~700 KiB after gzip) that prints a marker line on /dev/console
+// + /dev/kmsg + stdout, then powers off cleanly via reboot(2)
+// LINUX_REBOOT_CMD_POWER_OFF. This is the smallest /init the
+// kernel will actually exec end-to-end.
 //
-// Layout (cpio newc + gzip):
+// Layout (cpio newc + gzip), per arch:
 //
-//	./init    (static aarch64 ELF, ~1.3 MiB, no libc)
+//	./init    (static native ELF, ~1.3 MiB, no libc)
 //
-// Total compressed size: ~570 KiB — still small enough to inline
-// in the EFI binary; the parent kernelboot EFI grows from the
-// previous ~7 MiB baseline by under 1 MiB.
+// Total compressed size per arch: ~700 KiB — still small enough
+// to inline in the EFI binary; the parent kernelboot EFI grows
+// from the previous ~7 MiB baseline by under 1 MiB.
 //
 // Construction (host-side, reproducible)
 //
@@ -59,17 +59,20 @@
 // Result: bit-reproducible initramfs.cpio.gz for a fixed Go
 // toolchain version.
 //
-// Multiarch
+// Multiarch (M8.11/M8.12 — riscv64 + loong64 live)
 //
-// Today the M8.x kernel-boot path is arm64-only (live) — see
-// kernelboot_arm64.go. The riscv64 + loong64 MODE C scaffolding
-// from M8.3 doesn't yet boot Linux end-to-end (no validated public
-// EFI-stub kernel OCI ref for those archs), so a single arm64
-// /init covers the only live target. When riscv64/loong64 join,
-// either fan this embed out to per-arch blobs (init_src/init.<arch>
-// builds + per-arch *.cpio.gz embeds) or keep a single blob with
-// per-arch /init.<arch> ELFs plus a tiny static dispatcher — TBD
-// per M8.x as those archs come online.
+// M8.10 shipped arm64 end-to-end (/init reached). M8.11 + M8.12
+// brought riscv64 + loong64 end-to-end the same way, which forced
+// the per-arch fan-out: the Linux kernel execs /init as a native
+// ELF, so a riscv64 kernel cannot run an aarch64 /init (kernel
+// reports "No working init found" + panic).
+//
+// Layout: initramfs_<arch>.cpio.gz blobs sit alongside per-arch
+// initramfs_<arch>.go embed files gated by //go:build <arch>. The
+// init_src/build.sh helper rebuilds all three at once. Tamago
+// link picks the right blob via the build tag without runtime
+// branching, so the EFI binary inlines only its own arch's
+// initramfs (no wasted ~700 KiB × 2 from sibling arches).
 //
 // The blob is gzip-compressed (`1f 8b 08` magic) so the MODE C
 // gzip-detect path in phase2_oci_kernel_boot.go treats it

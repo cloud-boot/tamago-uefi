@@ -46,6 +46,37 @@
 // ghcr.io/cloud-boot/vmlinuz-loong64:latest. To switch the boot
 // consumer over, change kernelBootTargetRef below to that ref.
 
+//
+// M8.12 end-to-end (2026-06-10)
+//
+// First full end-to-end Linux kernel boot from OCI on loong64:
+// streamed `https://ttl.sh/cloudboot-vmlinuz-loong64:24h` (Linux
+// 7.0.12 from Debian) via MODE C, EFI-stub jumped straight into
+// the kernel (loong64's EFI-stub is quieter — no "Booting Linux
+// Kernel..." line), kernel proper unpacked the initramfs, exec'd
+// /init, printed the Phase 2 Path D banner, powered off cleanly
+// via reboot(2). Wall: 17.1s end-to-end. ZERO per-arch QEMU or
+// cmdline tweaks needed vs. M8.4 dormant scaffolding — the only
+// change was per-arch /init binary (initramfs_loong64.cpio.gz
+// embed gated by //go:build loong64).
+//
+// Why no `-cpu` pin like arm64 needed: the Debian 7.0.12 loong64
+// kernel is brand new (2026-06-09 build) and works cleanly with
+// QEMU 9.x's `-cpu max`. No analogue of arm64's stale 5.10.29
+// Talos kernel incompat.
+//
+// Why no DTB/RNG fixes like arm64 needed: loong64 EDK2 firmware
+// publishes ACPI 2.0 tables (8868e871-... GUID present in our
+// probe dump at index 9) which the kernel auto-discovers, and
+// does not publish EFI_RNG_PROTOCOL (verified — none of the 10
+// GUIDs match 3152bca5-...), so efi_random_get_seed() takes its
+// EFI_NOT_FOUND early-exit path naturally.
+//
+// Cmdline: identical to the M8.4 baseline. `console=ttyS0,115200`
+// is the loong64 virt machine's 16550-style UART (different from
+// arm64's PL011 and riscv64's SBI debug console). The kernel
+// auto-discovers it via ACPI SPCR + the embedded firmware DTB.
+
 //go:build phase2_oci_kernel_boot && tamago && loong64
 
 package main

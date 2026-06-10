@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"runtime"
 	"testing"
 )
 
@@ -130,10 +131,23 @@ func TestEmbedContainsInitELF(t *testing.T) {
 			if body[5] != 0x01 {
 				t.Errorf("/init EI_DATA = %02x, want 01 (ELFDATA2LSB)", body[5])
 			}
-			// e_machine at offset 18 (LSB): 0xB7 == EM_AARCH64.
-			if body[18] != 0xB7 || body[19] != 0x00 {
-				t.Errorf("/init e_machine = %02x %02x, want B7 00 (EM_AARCH64)",
-					body[18], body[19])
+			// e_machine at offset 18-19 (LE u16). Per-arch:
+			//   arm64   -> 0x00B7 (EM_AARCH64)
+			//   riscv64 -> 0x00F3 (EM_RISCV)
+			//   loong64 -> 0x0102 (EM_LOONGARCH)
+			// The "other" fallback (amd64/darwin hosts) embeds the
+			// arm64 blob, so expect EM_AARCH64 there too.
+			wantLo, wantHi := byte(0xB7), byte(0x00)
+			wantName := "EM_AARCH64"
+			switch runtime.GOARCH {
+			case "riscv64":
+				wantLo, wantHi, wantName = 0xF3, 0x00, "EM_RISCV"
+			case "loong64":
+				wantLo, wantHi, wantName = 0x02, 0x01, "EM_LOONGARCH"
+			}
+			if body[18] != wantLo || body[19] != wantHi {
+				t.Errorf("/init e_machine = %02x %02x, want %02x %02x (%s)",
+					body[18], body[19], wantLo, wantHi, wantName)
 			}
 			return
 		}

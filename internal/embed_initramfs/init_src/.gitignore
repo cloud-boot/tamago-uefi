@@ -1,6 +1,12 @@
 # Built artifacts of build.sh — only init.go + build.sh are
 # source. Everything below is regenerated from `./build.sh` and
-# never committed (the produced cpio.gz lives in the parent dir
-# under initramfs.cpio.gz which IS committed).
+# never committed (the produced cpio.gz blobs live in the parent
+# dir under initramfs_<arch>.cpio.gz which ARE committed).
 /init
+/init.arm64
+/init.riscv64
+/init.loong64
 /root/
+/root_arm64/
+/root_riscv64/
+/root_loong64/

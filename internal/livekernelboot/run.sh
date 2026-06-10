@@ -277,16 +277,25 @@ case "$ARCH" in
         if [[ "$ARCH" == "arm64" ]]; then
             grep -q "phase2-oci-kernel-boot: DTB published" "$LOG" || PASS=0
             grep -q "EFI stub: Using DTB from configuration table" "$LOG" || PASS=0
-            # M8.10 closure (R-M8.9a): FIRST FULL END-TO-END
-            # KERNEL BOOT — the Linux EFI-stub now reaches
-            # ExitBootServices, the kernel proper takes over,
-            # runs through head.S + start_kernel, mounts the
-            # initramfs as / and execs our /init. The Path D
-            # banner is the load-bearing proof.
-            grep -q "Run /init as init process" "$LOG" || PASS=0
-            grep -q "cloud-boot/openweft Phase 2 Path D" "$LOG" || PASS=0
-            grep -q "reboot: Power down" "$LOG" || PASS=0
         fi
+        # M8.10 (arm64) / M8.11 (riscv64) / M8.12 (loong64) closure:
+        # FIRST FULL END-TO-END KERNEL BOOT — the Linux EFI-stub
+        # now reaches ExitBootServices, the kernel proper takes
+        # over, runs through head.S + start_kernel, mounts the
+        # initramfs as / and execs our /init. The Path D banner
+        # is the load-bearing proof userspace booted; reboot
+        # Power down proves clean exit.
+        #
+        # riscv64 + loong64 don't go through PublishDTB — the
+        # EFI-stub generates an empty DTB and the kernel boots
+        # cleanly anyway because the riscv64/loong64 firmware
+        # publishes its hardware via DTB/ACPI tables the kernel
+        # auto-discovers (sbi for rv64, ACPI for loong64). So
+        # the DTB-published gate is arm64-only above; the
+        # userspace banner gate is universal below.
+        grep -q "Run /init as init process" "$LOG" || PASS=0
+        grep -q "cloud-boot/openweft Phase 2 Path D" "$LOG" || PASS=0
+        grep -q "reboot: Power down" "$LOG" || PASS=0
         ;;
     *)
         # Other arches stay on MODE B self-test (chainedhello payload).
