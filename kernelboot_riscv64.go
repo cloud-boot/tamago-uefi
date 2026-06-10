@@ -1,70 +1,53 @@
 // Copyright 2026 The cloud-boot Authors.
 // SPDX-License-Identifier: BSD-3-Clause
 //
-// Per-arch kernel-boot constants for riscv64 (M8.4 per-arch
-// landscape, 2026-06-10). Documentation for each variable lives
-// next to its shared consumer in phase2_oci_kernel_boot.go.
+// Per-arch kernel-boot constants for riscv64 (M8.4 self-publish,
+// 2026-06-10). Documentation for each variable lives next to its
+// shared consumer in phase2_oci_kernel_boot.go.
 //
-// Riscv64 status (M8.4): DORMANT. A second 60-min OCI hunt on
-// 2026-06-10 (following the initial 30-min hunt) probed 20+ public
-// OCI registries / orgs / namespaces and surfaced NO publicly-
-// anonymous-pullable EFI-stub Linux kernel suitable for the
-// streaming + LoadImage + StartImage path. Findings summary:
+// Riscv64 status (M8.4 self-publish): MODE C active against a
+// cloud-boot self-published EFI-stub kernel.
 //
-//   - siderolabs/kernel: amd64 + arm64 only across `latest`,
-//     `v1.11.0`, and `v1.14.0-alpha.0-76-g09cb04e` (latest nightly).
-//     No `kernel-riscv64` / `installer-riscv64` arch-suffixed repos
-//     exist (HTTP 401 = nonexistent under anonymous ghcr.io scope).
-//   - siderolabs/talos: same shape (amd64 + arm64). The
-//     `talosctl-linux-riscv64` artefact is a CLI binary, NOT a
-//     kernel OCI layer.
-//   - tinkerbell/hook + hook-kernel: MANIFEST_UNKNOWN for `:latest`
-//     across ghcr.io and quay.io. Hook releases ship arm64 +
-//     x86_64 tarballs only.
-//   - bootc images (quay.io/fedora/fedora-bootc, centos-bootc) DO
-//     ship `/usr/lib/modules/<ver>/vmlinuz` but multi-arch index
-//     covers amd64/arm64/ppc64le/s390x only.
-//   - Bottlerocket (public.ecr.aws/bottlerocket/*): no rv64.
-//   - distro base rootfs images (debian:sid, ubuntu:noble,
-//     alpine:latest, opensuse/tumbleweed) DO include rv64 manifests
-//     (46 MB / 26 MB / 3.6 MB / 37.6 MB respectively) but ship as
-//     pure rootfs WITHOUT `/boot/vmlinuz` — kernel comes from a
-//     follow-on `apt install linux-image-riscv64` / `apk add
-//     linux-virt`, neither reachable from a non-running TamaGo EFI.
-//   - ghcr.io/loong64/openeuler rv64 variant (the only multi-arch
-//     openEuler with rv64 entries) is dnf rootfs only, 87.7 MB.
-//   - quay.io/fedora-coreos + registry.fedoraproject.org/fedora:
-//     no rv64 in multi-arch index.
+// History:
 //
-// The wiring below stays at "" so the runtime path collapses to
-// MODE B (self-test against the in-process Transport using the
-// embedded chained EFI bytes for riscv64). The split + constants
-// remain in tree so flipping to MODE C is a one-line change the
-// day a public anonymous riscv64 EFI-stub kernel OCI artifact
-// appears.
+//   - The 2026-06-10 60-min OCI hunt confirmed NO public anonymous
+//     OCI artifact ships an EFI-stub riscv64 kernel standalone, and
+//     no public rootfs OCI image ships /boot/vmlinuz inside its layer
+//     (verified directly against riscv64/debian:sid, openeuler rv64,
+//     ubuntu rv64, alpine rv64, opensuse rv64, etc.).
+//   - The kernel however DOES exist as a PE32+ EFI-stub binary inside
+//     Debian's `linux-image-6.12.90+deb13.1-riscv64` .deb under
+//     /boot/vmlinux-* (yes, "vmlinux" — Debian builds riscv64 with
+//     CONFIG_EFI_ZBOOT=n so the EFI-stub wrapping IS the vmlinux
+//     itself; `file` reports "PE32+ executable (EFI application)
+//     RISC-V 64-bit").
+//   - We therefore extract that file with cmd/cloudboot-oci-extract
+//     and re-publish as a single-blob OCI artifact under ttl.sh.
+//     See cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.4
+//     "self-publish" for the toolchain doc.
 //
-// Suggested values once a public ref exists:
-//   kernelBootTargetRef = "https://<host>/<repo>:<tag>"
-//   kernelBootCmdline   = "console=hvc0 earlycon=sbi"   (QEMU virt
-//                                                        riscv64;
-//                                                        SBI early-
-//                                                        console
-//                                                        works
-//                                                        before
-//                                                        any UART
-//                                                        is up).
+// ttl.sh is 24h-anonymous; the constant below is valid until ~24h
+// after the last publish. For permanence, re-publish via:
 //
-// See cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.4
-// "Public ref landscape" for the full candidate table + upstream
-// trackers where requests can be filed.
+//   /tmp/cb-extract/cloudboot-oci-extract \
+//     -src 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-image-6.12.90+deb13.1-riscv64_6.12.90-2_riscv64.deb' \
+//     -arch riscv64 \
+//     -dst 'ttl.sh/cloudboot-vmlinuz-riscv64:24h' \
+//     -cmdline-hint 'console=hvc0 earlycon=sbi'
+//
+// Follow-up: nightly GitHub Action under cloud-boot/ops, or
+// PAT-authenticated push to ghcr.io/cloud-boot/vmlinuz-riscv64 for
+// permanence.
 
 //go:build phase2_oci_kernel_boot && tamago && riscv64
 
 package main
 
 var (
-	kernelBootTargetRef         = ""
-	kernelBootCmdline           = ""
+	kernelBootTargetRef = "https://ttl.sh/cloudboot-vmlinuz-riscv64:24h"
+	kernelBootCmdline   = "console=hvc0 earlycon=sbi " +
+		"root=/dev/ram0 rdinit=/init " +
+		"loglevel=8 panic=10"
 	kernelBootInitrdRef         = ""
-	kernelBootUseEmbeddedInitrd = false
+	kernelBootUseEmbeddedInitrd = true
 )

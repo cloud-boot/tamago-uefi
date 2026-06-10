@@ -14,12 +14,16 @@ import (
 	_ "unsafe"
 )
 
-// RamSize: 64 MiB. cpuinit_loong64.s passes (RamSize >> 12) as the page
-// count to gBS->AllocatePages and points goos.RamStart / goos.Bloc at
-// the returned base. 64 MiB safely fits in QEMU virt -m 4096.
+// RamSize: 128 MiB. Bumped from 64 MiB on 2026-06-10 to match
+// board_arm64.go for M8.4 self-publish MODE C: the streamed Debian
+// loong64 vmlinuz is 8.7 MiB raw / 8.3 MiB gzipped (zstd-compressed
+// payload already), so the streaming buffer + tar walk fits well
+// under 32 MiB — but we go to 128 MiB so the heap has the same
+// breathing room arm64 has post-stream when LoadImage runs.
+// Safely fits in QEMU virt -m 4096.
 //
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint64 = 0x04000000
+var ramSize uint64 = 0x08000000
 
 // Framework loong64 has no RamStackOffset linkname; declare it here.
 // 1 MiB stack window matches the arm64/amd64/riscv64 defaults.

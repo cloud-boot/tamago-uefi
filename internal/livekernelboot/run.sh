@@ -145,6 +145,9 @@ case "$ARCH" in
         )
         ;;
     riscv64)
+        # M8.4 self-publish: riscv64 also runs MODE C now (ttl.sh
+        # self-published EFI-stub kernel from cloudboot-oci-extract);
+        # therefore needs the same outbound netdev as arm64.
         cp "$FW_VARS" "$WORK/vars.fd"
         QEMU_ARGS=(
             -machine virt -m 4096
@@ -153,10 +156,15 @@ case "$ARCH" in
             -drive "if=pflash,format=raw,file=$FW_VARS,unit=1"
             -drive "file=$ESP,format=raw,if=none,id=esp"
             -device "virtio-blk-device,drive=esp"
+            -netdev "user,id=n0"
+            -device "virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off"
             -serial stdio
         )
         ;;
     loong64)
+        # M8.4 self-publish: loong64 also runs MODE C now (ttl.sh
+        # self-published EFI-stub kernel from cloudboot-oci-extract);
+        # therefore needs the same outbound netdev as arm64.
         cp "$FW_VARS" "$WORK/vars.fd"
         QEMU_ARGS=(
             -machine virt -cpu max -m 4096
@@ -165,6 +173,8 @@ case "$ARCH" in
             -drive "if=pflash,format=raw,file=$WORK/vars.fd"
             -drive "file=$ESP,format=raw,if=none,id=esp"
             -device "virtio-blk-pci,drive=esp"
+            -netdev "user,id=n0"
+            -device "virtio-net-pci,netdev=n0,disable-legacy=on,disable-modern=off"
             -serial stdio
         )
         ;;
@@ -192,16 +202,25 @@ ELAPSED_MS=$(( (END_NS - START_NS) / 1000000 ))
 
 PASS=1
 case "$ARCH" in
-    arm64)
+    arm64|riscv64|loong64)
         # M8.4 MODE C — real-registry kernel streaming + DTB probe +
         # initrd publish + EFI-stub handoff. Acceptance gate covers
         # both the framework's reach (DHCP, HTTPS, OCI manifest walk,
         # layer stream) AND the new M8.4 plumbing (DTB probe fires,
         # PublishInitrd succeeds, EFI-stub reaches initramfs unpack).
+        #
+        # riscv64 + loong64 joined MODE C in M8.4 self-publish
+        # (2026-06-10) — kernels extracted from Debian linux-image /
+        # linux-binary .deb and re-published to ttl.sh by the
+        # cmd/cloudboot-oci-extract tool.
         grep -q "phase2-oci-kernel-boot: MODE = C" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: device UP" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: lease acquired" "$LOG" || PASS=0
-        grep -q "phase2-oci-kernel-boot: picked per-arch manifest" "$LOG" || PASS=0
+        # Manifest pick: multi-arch index emits "picked per-arch
+        # manifest" + then a digest line; single-arch manifest (the
+        # M8.4 self-publish shape) skips the pick and goes straight to
+        # "streaming layer digest". Either path is acceptable.
+        grep -qE "phase2-oci-kernel-boot: (picked per-arch manifest|streaming layer digest)" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: streaming layer digest" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: extracting boot/vmlinuz" "$LOG" || PASS=0
         # M8.4 additions: DTB probe walks ConfigurationTable, and
@@ -209,6 +228,13 @@ case "$ARCH" in
         # under LINUX_EFI_INITRD_MEDIA_GUID. Both must fire.
         grep -q "phase2-oci-kernel-boot: DTB probe:" "$LOG" || PASS=0
         grep -q "phase2-oci-kernel-boot: PublishInitrd OK" "$LOG" || PASS=0
+        # M8.4 self-publish (2026-06-10): require post-StartImage
+        # kernel-side proof. The Linux EFI-stub prints either
+        # "EFI stub: Booting Linux Kernel..." (arm64/rv64) or jumps
+        # straight to the post-decompress "Linux version N.N..." line
+        # (loong64 — its EFI-stub is quieter). Either is acceptable
+        # proof the OCI-streamed kernel ran.
+        grep -qE "(EFI stub: Booting Linux Kernel|Linux version )" "$LOG" || PASS=0
         ;;
     *)
         # Other arches stay on MODE B self-test (chainedhello payload).

@@ -2,69 +2,51 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Per-arch kernel-boot constants for loong64 (LoongArch64, M8.4
-// per-arch landscape, 2026-06-10). Documentation for each variable
-// lives next to its shared consumer in phase2_oci_kernel_boot.go.
+// self-publish, 2026-06-10). Documentation for each variable lives
+// next to its shared consumer in phase2_oci_kernel_boot.go.
 //
-// Loong64 status (M8.4): DORMANT. LoongArch64 is younger than
-// riscv64 and the public OCI kernel ecosystem is even sparser. The
-// expanded 60-min hunt on 2026-06-10 probed every known LoongArch-
-// adjacent registry / org and found NO public anonymous OCI artifact
-// shipping `/boot/vmlinuz` for loong64:
+// Loong64 status (M8.4 self-publish): MODE C active against a
+// cloud-boot self-published EFI-stub kernel.
 //
-//   - siderolabs/kernel + installer + imager + talos: no loong64
-//     entry across `latest`, `v1.11.0`, `v1.14.0-alpha.0-76-g09cb04e`
-//     (latest nightly). No `*-loong64` arch-suffixed siderolabs
-//     repos exist.
-//   - tinkerbell/hook + bottlerocket + bootc images: no loong64.
-//   - Kairos / k0sproject / oneblock-ai: no loong64 build.
-//   - cr.loongnix.cn (the closest loong64-specific registry):
-//     refuses anonymous access (HTTP 401 on /v2/_catalog and on
-//     bearer-token requests). Pull requires a Loongnix account;
-//     not viable for anonymous CI.
-//   - ghcr.io/loong64/openeuler:24.03-{default,init,base}-20260426:
-//     reachable, loong64 manifest present (94 / 92 / 92 MB), but
-//     all three variants are dnf rootfs WITHOUT `/boot/vmlinuz`.
-//   - ghcr.io/loong64/loongnix:23.1-default-20250822: reachable
-//     (40 MB zstd) but AFS-overlay rootfs only, no kernel.
-//   - ghcr.io/loong64/{anolis,opencloudos,kylin,alpine,debian}:
-//     all rootfs-only variants of their respective distros.
-//   - docker.io/openeuler/openeuler:24.03-lts: amd64 + arm64 only
-//     (no loong64 in upstream Docker Hub index).
-//   - docker.io/loongarch64/{debian,ubuntu}:* : MANIFEST_UNKNOWN.
-//   - swr.cn-north-4.myhuaweicloud.com/openeuler/* and
-//     dr.openkylin.top/*: not anonymously OCI-pullable (Huawei
-//     Cloud auth + openKylin distributes ISO/squashfs over HTTP).
-//   - registry.gitlab.com/loongarchlinux/*: GitLab registry
-//     refuses anonymous reads.
+// History:
 //
-// The wiring below stays at "" so the runtime path collapses to
-// MODE B (self-test against the in-process Transport using the
-// embedded chained EFI bytes for loong64). The split + constants
-// remain in tree so flipping to MODE C is a one-line change the
-// day a public anonymous loong64 EFI-stub kernel OCI artifact
-// appears.
+//   - The 2026-06-10 60-min OCI hunt confirmed NO public anonymous
+//     OCI artifact ships an EFI-stub loong64 kernel, and no public
+//     rootfs OCI image ships /boot/vmlinuz inside its layer
+//     (verified directly against every ghcr.io/loong64/openeuler
+//     tag — default/init/base/toolbox/minimal/micro across all
+//     dates from 2025-08 through 2026-02).
+//   - The kernel however DOES exist as a PE32+ EFI-stub binary inside
+//     Debian's `linux-binary-7.0.12+deb14-loong64` .deb under
+//     /boot/vmlinuz-* (`file` reports "PE32+ executable
+//     (EFI application)"; COFF Machine 0x6264 = LoongArch64).
+//   - We therefore extract that file with cmd/cloudboot-oci-extract
+//     and re-publish as a single-blob OCI artifact under ttl.sh.
+//     See cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.4
+//     "self-publish" for the toolchain doc.
 //
-// Suggested values once a public ref exists:
-//   kernelBootTargetRef = "https://<host>/<repo>:<tag>"
-//   kernelBootCmdline   = "console=ttyS0,115200"  (QEMU virt loong64;
-//                                                   the LoongArch
-//                                                   `virt` machine
-//                                                   exposes a single
-//                                                   16550-compatible
-//                                                   UART at the
-//                                                   default address).
+// ttl.sh is 24h-anonymous; the constant below is valid until ~24h
+// after the last publish. For permanence, re-publish via:
 //
-// See cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.4
-// "Public ref landscape" for the full candidate table + upstream
-// trackers where requests can be filed.
+//   /tmp/cb-extract/cloudboot-oci-extract \
+//     -src 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-binary-7.0.12+deb14-loong64_7.0.12-1_loong64.deb' \
+//     -arch loong64 \
+//     -dst 'ttl.sh/cloudboot-vmlinuz-loong64:24h' \
+//     -cmdline-hint 'console=ttyS0,115200'
+//
+// Follow-up: nightly GitHub Action under cloud-boot/ops, or
+// PAT-authenticated push to ghcr.io/cloud-boot/vmlinuz-loong64 for
+// permanence.
 
 //go:build phase2_oci_kernel_boot && tamago && loong64
 
 package main
 
 var (
-	kernelBootTargetRef         = ""
-	kernelBootCmdline           = ""
+	kernelBootTargetRef = "https://ttl.sh/cloudboot-vmlinuz-loong64:24h"
+	kernelBootCmdline   = "console=ttyS0,115200 " +
+		"root=/dev/ram0 rdinit=/init " +
+		"loglevel=8 panic=10"
 	kernelBootInitrdRef         = ""
-	kernelBootUseEmbeddedInitrd = false
+	kernelBootUseEmbeddedInitrd = true
 )

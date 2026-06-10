@@ -28,14 +28,15 @@ import (
 	_ "unsafe"
 )
 
-// RamSize: 32 MiB. On riscv64-virt the firmware places the image and
-// its tables high in the installed RAM region (typical 4 GiB build);
-// 32 MiB above the image base safely fits the heap arena for the
-// hello-world PoC. Replace with a UEFI memory-map reconciliation
-// post-World for a real loader.
+// RamSize: 128 MiB. Bumped from 32 MiB on 2026-06-10 to match
+// board_arm64.go for M8.4 self-publish MODE C: the streamed Debian
+// riscv64 vmlinux is 31 MiB raw / 10 MiB gzipped, and the buffered
+// gunzip+tar pipeline in streamExtractVmlinuz needs raw + compressed
+// + tar buffer simultaneously (~42 MiB peak). 32 MiB no longer fits.
+// 128 MiB safely fits in QEMU virt -m 4096.
 //
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint64 = 0x02000000
+var ramSize uint64 = 0x08000000
 
 // rdtime reads the user-mode TIME CSR (encoding 0xC01) — available
 // under S-mode UEFI thanks to OpenSBI's TIME extension.
