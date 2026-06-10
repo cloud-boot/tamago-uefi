@@ -66,6 +66,27 @@ type Stack struct {
 	// arpTimeout is the per-Resolve wait window. Configurable so
 	// tests can shorten it; defaults to ARPDefaultTimeout.
 	arpTimeout time.Duration
+
+	// DefaultDialAttempts is the number of attempts DialTLS and
+	// DialTCP4 take before surfacing the last error. Zero is
+	// promoted to DefaultDialAttemptsFallback (3) by the dial-retry
+	// path so an unconfigured Stack still retries — RFC-9112 §9.5
+	// and general transport hygiene call for retry on transient
+	// network failures, and the public ghcr.io path has been
+	// observed to FAIL once and succeed on the second attempt over
+	// the same wall-clock window.
+	//
+	// Callers that want strict single-shot behaviour set this to 1.
+	DefaultDialAttempts int
+
+	// DefaultDialBaseDelay is the base sleep between attempts; the
+	// dial-retry path doubles it on each failure (exponential
+	// backoff). Zero is promoted to DefaultDialBaseDelayFallback
+	// (2s). With the default 3 attempts the total max wait between
+	// attempts is 2s + 4s = 6s; total wall-clock budget for a full
+	// 3-attempt run is roughly 3 × per-attempt-timeout + 6s of
+	// backoff.
+	DefaultDialBaseDelay time.Duration
 }
 
 // New returns an unstarted Stack bound to the given Link. The Stack

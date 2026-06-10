@@ -450,6 +450,9 @@ func TestTCP4DialTimeoutNoServer(t *testing.T) {
 	s.SetARPTimeout(20 * time.Millisecond)
 	_ = s.SetIPv4Address(net.IPv4(10, 0, 2, 15), net.IPv4Mask(255, 255, 255, 0))
 	_ = s.SetDefaultGateway(net.IPv4(10, 0, 2, 2))
+	// Single-shot for this test: the retry path is exercised
+	// separately by dial_retry_test.go.
+	s.DefaultDialAttempts = 1
 	s.Start()
 	defer s.Close()
 	_, err := s.DialTCP4(net.IPv4(10, 0, 2, 2), 80, 80*time.Millisecond)

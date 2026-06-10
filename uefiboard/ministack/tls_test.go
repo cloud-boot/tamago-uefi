@@ -113,6 +113,10 @@ func TestDialTLSZeroTimeoutFallsBack(t *testing.T) {
 	_ = s.SetIPv4Address(net.IPv4(10, 0, 2, 15), net.IPv4Mask(255, 255, 255, 0))
 	_ = s.SetDefaultGateway(net.IPv4(10, 0, 2, 2))
 	s.SetARPTimeout(50 * time.Millisecond)
+	// Single-shot for this test: the retry path is exercised
+	// separately by dial_retry_test.go; here we only care about the
+	// timeout-fallback wiring.
+	s.DefaultDialAttempts = 1
 	defer s.Close()
 	_, err := s.DialTLS("10.0.2.99", 443, nil, 100*time.Millisecond)
 	if err == nil {

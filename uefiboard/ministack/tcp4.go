@@ -157,6 +157,7 @@ var (
 	ErrTCP4ConnRefused    = errors.New("ministack: TCP connection refused (RST)")
 	ErrTCP4InvalidAddr    = errors.New("ministack: TCP destination must be IPv4")
 	ErrTCP4NotConnected   = errors.New("ministack: TCP connection not established")
+	ErrTCP4NoLocalAddr    = errors.New("ministack: no local IPv4 address set")
 )
 
 // TCP4Header is the parsed view of a TCP header (fixed fields only;
@@ -748,7 +749,22 @@ func tcp4InitialSeq(mac net.HardwareAddr, localPort uint16) uint32 {
 // has been set DialTCP4 returns an error rather than dialing from
 // 0.0.0.0 (TCP doesn't survive a source-IP change like DHCP DISCOVER
 // does, so we require a real local address).
+//
+// DialTCP4 now defaults to retry-with-exponential-backoff using
+// `Stack.DefaultDialAttempts` and `Stack.DefaultDialBaseDelay` — the
+// public registry (ghcr.io) occasionally fails the initial TCP
+// connect under tamago+UEFI, and a properly-implemented retry path
+// turns those transient failures into a single user-visible success.
+// Callers that need the strict single-shot behaviour use dialTCP4Once
+// or set Stack.DefaultDialAttempts=1.
 func (s *Stack) DialTCP4(dst net.IP, port uint16, timeout time.Duration) (*TCP4Conn, error) {
+	return s.DialTCP4WithRetry(dst, port, timeout, s.DefaultDialAttempts, s.DefaultDialBaseDelay)
+}
+
+// dialTCP4Once is the single-shot core that the retry wrapper invokes
+// per attempt. Preserves the exact behaviour the M5 ministack shipped
+// — caller is responsible for any retry policy on top.
+func (s *Stack) dialTCP4Once(dst net.IP, port uint16, timeout time.Duration) (*TCP4Conn, error) {
 	d4 := dst.To4()
 	if d4 == nil {
 		return nil, ErrTCP4InvalidAddr
@@ -760,7 +776,7 @@ func (s *Stack) DialTCP4(dst net.IP, port uint16, timeout time.Duration) (*TCP4C
 	}
 	if s.route.Local == nil {
 		s.mu.Unlock()
-		return nil, errors.New("ministack: no local IPv4 address set")
+		return nil, ErrTCP4NoLocalAddr
 	}
 	localIP := append(net.IP(nil), s.route.Local...)
 	mac := s.link.MAC()

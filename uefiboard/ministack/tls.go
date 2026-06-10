@@ -137,7 +137,7 @@ func NewTLSConfig(serverName string) (*tls.Config, error) {
 // DialTLS opens a TCP4 connection to `host:port` via the ministack
 // Stack, then wraps it in a TLS client using NewTLSConfig(host).
 //
-// Sequence:
+// Sequence (per attempt):
 //
 //   1. Parse `host` as an IPv4 literal; if not, ResolveA via the
 //      supplied DNS server.
@@ -148,12 +148,26 @@ func NewTLSConfig(serverName string) (*tls.Config, error) {
 //   5. On any error, close the TCP conn and surface the error.
 //
 // `timeout` is the wall-clock cap for the WHOLE dial-+-handshake
-// sequence (not per-stage), to mirror the M5 HTTPGet shape.
+// sequence per attempt (not per-stage, not cumulative across retries),
+// to mirror the M5 HTTPGet shape.
+//
+// DialTLS defaults to retry-with-exponential-backoff using
+// `Stack.DefaultDialAttempts` and `Stack.DefaultDialBaseDelay` — the
+// public ghcr.io path has been observed to fail the initial dial /
+// handshake and succeed on the second attempt over the same wall-clock
+// window. See DialTLSWithRetry for the explicit per-call shape.
 //
 // On success the returned *tls.Conn carries the TLS state and the
 // underlying TCP4Conn. Caller MUST Close() it (which closes the
 // inner TCP4Conn too).
 func (s *Stack) DialTLS(host string, port uint16, dnsServer net.IP, timeout time.Duration) (*tls.Conn, error) {
+	return s.DialTLSWithRetry(host, port, dnsServer, timeout, s.DefaultDialAttempts, s.DefaultDialBaseDelay)
+}
+
+// dialTLSOnce is the single-shot core that the retry wrapper invokes
+// per attempt. Preserves the exact behaviour the M6 ministack shipped
+// — caller is responsible for any retry policy on top.
+func (s *Stack) dialTLSOnce(host string, port uint16, dnsServer net.IP, timeout time.Duration) (*tls.Conn, error) {
 	if host == "" {
 		return nil, ErrTLSNoServerName
 	}
