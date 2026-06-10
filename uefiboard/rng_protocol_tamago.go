@@ -113,6 +113,75 @@ func readXorshiftTamago(buf uintptr, n uintptr) uintptr {
 	return n
 }
 
+// UninstallAllRNG yanks EFI_RNG_PROTOCOL from every handle in the
+// firmware's handle database without installing our own replacement.
+// After it returns, a subsequent
+// gBS->LocateProtocol(EFI_RNG_PROTOCOL_GUID, NULL, &iface) returns
+// EFI_NOT_FOUND, which lets the Linux EFI-stub's
+// `efi_random_get_seed()` short-circuit (see
+// drivers/firmware/efi/libstub/random.c — when locate_protocol fails
+// the function sets seed_size = 0 and, absent a `RandomSeed` UEFI
+// variable, returns early without any further firmware calls).
+//
+// Returns the count of interfaces yanked (0 = none were present).
+//
+// Why this rather than PublishRNG (R-M8.8a, 2026-06-10): PublishRNG
+// closed R-M8.6a (RngDxe.dll crash on KASLR retry) by replacing the
+// firmware's RngDxe handle with our crypto/rand-backed handler. But
+// running with M81_LIVE_KEEPRUN=1 + post-EBS log inspection
+// uncovered a SECOND pre-ExitBootServices Data Abort downstream of
+// our handler — somewhere in `efi_random_get_seed()`'s post-GetRNG
+// flow (install_configuration_table + memory-map walk). The
+// simplest and most robust workaround is to make
+// efi_random_get_seed() take the "no RNG available" early-exit
+// path: zero firmware calls instead of (our GetRNG +
+// install_configuration_table + free_pool + ...). The kernel's own
+// entropy pool is seeded later from CPU + interrupt timing — the
+// EFI-stub seed is a defence-in-depth value, not a hard
+// requirement for boot.
+//
+// Idempotency: safe to call multiple times; subsequent calls find
+// no interfaces and return 0.
+//
+// See cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.9 for
+// the full diagnosis trace + decision rationale.
+func UninstallAllRNG() int {
+	bs := getBootServices()
+	if bs == 0 {
+		return 0
+	}
+	handles, lerr := LocateHandleBuffer(&EFIRngProtocolGUID)
+	if lerr != nil {
+		// LocateHandleBuffer returning an error covers both "no
+		// such GUID in the handle database" (which is what we
+		// want — nothing to do) and "out of resources" (rare on
+		// fresh boot). Either way, nothing to yank.
+		return 0
+	}
+	yanked := 0
+	for _, h := range handles {
+		iface, herr := HandleProtocol(h, &EFIRngProtocolGUID)
+		if herr != nil {
+			println("phase2-rng: HandleProtocol(existing RNG) skip:", herr.Error())
+			continue
+		}
+		ustatus := efiCall(
+			bs+efiBSUninstallProtocolInterface,
+			h,
+			uint64(uintptr(unsafe.Pointer(&EFIRngProtocolGUID))),
+			iface,
+			0, 0, 0,
+		)
+		if ustatus != efiSuccess {
+			println("phase2-rng: UninstallProtocolInterface(firmware RNG) non-success:", ustatus)
+			continue
+		}
+		println("phase2-rng: uninstalled firmware RNG interface on handle =", h)
+		yanked++
+	}
+	return yanked
+}
+
 // PublishRNG installs an EFI_RNG_PROTOCOL instance on a fresh
 // handle. Returns the firmware-assigned handle (caller passes to
 // UnpublishRNG to remove) or an error.

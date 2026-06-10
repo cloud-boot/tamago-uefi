@@ -727,27 +727,36 @@ func runKernelBootLinuxKernel() {
 		println("phase2-oci-kernel-boot: no DTB source available; falling through (kernel may fault)")
 	}
 
-	// PublishRNG (M8.7, R-M8.6a): install our own
-	// EFI_RNG_PROTOCOL (GUID 3152bca5-eade-433d-862e-c01cdc291f44)
-	// backed by crypto/rand so the Linux EFI-stub's call into
-	// efi_get_random_bytes hits OUR handler and returns
-	// EFI_SUCCESS — avoiding the EDK2 RngDxe.dll Data Abort on
-	// `-machine virt` arm64. LocateProtocol uses first-match
-	// ordering: our handle is installed AFTER the firmware's own
-	// RngDxe, so technically RngDxe wins. However EDK2's
-	// RngDxe.dll fails the SECOND call (KASLR seed gather) with a
-	// Data Abort on the QEMU virt platform; having our handle
-	// present means the kernel's retry path AND any fallback
-	// LocateHandleBuffer + iterate that drivers may try will
-	// reach a working publisher. The kernel cmdline workaround
-	// (nokaslr random.trust_*=0) is kept in kernelboot_arm64.go
-	// to suppress as many calls as possible — defence in depth.
-	rngHandle, rngErr := uefiboard.PublishRNG()
-	if rngErr != nil {
-		println("phase2-oci-kernel-boot: PublishRNG failed:", rngErr.Error())
-	} else {
-		println("phase2-oci-kernel-boot: RNG published, handle =", hexUintptrKernelBoot(rngHandle))
-	}
+	// R-M8.8a CLOSED (M8.9, 2026-06-10): yank EFI_RNG_PROTOCOL from
+	// every firmware-installed handle WITHOUT installing our own
+	// replacement. This makes the Linux EFI-stub's
+	// efi_random_get_seed() (drivers/firmware/efi/libstub/random.c)
+	// take the "no RNG available" early-exit path — zero firmware
+	// calls instead of (GetRNG → install_configuration_table →
+	// free_pool → ...), which is where the M8.7 PublishRNG path was
+	// hitting a downstream NULL+0x40 Data Abort (X0=0, X1=0x40,
+	// X2=0x40 inside what looks like a memory-map debug string
+	// formatter post-GetRNG).
+	//
+	// Diagnostic history:
+	//   - M8.7 PublishRNG: replaced RngDxe with our trampoline. The
+	//     R-M8.6a crash (RngDxe.dll +0x3220 on KASLR retry) was
+	//     gone; the kernel called our GetRNG successfully (handle
+	//     printed in the runner log); the boot then continued into
+	//     a NEW pre-EBS abort downstream (R-M8.8a).
+	//   - M8.9 disable-PublishRNG probe: confirmed R-M8.8a only
+	//     fires when an EFI_RNG_PROTOCOL implementation is
+	//     reachable. With PublishRNG skipped AND RngDxe still
+	//     present the abort reverts to R-M8.6a inside RngDxe.dll.
+	//     The only path that avoids both is "no RNG available at
+	//     all" — UninstallAllRNG.
+	//
+	// Defence in depth: kernelboot_arm64.go still ships
+	// `nokaslr random.trust_bootloader=0 random.trust_cpu=0` so
+	// even if some downstream EFI-stub path were to re-attempt RNG
+	// it wouldn't seed kernel state from it.
+	yanked := uefiboard.UninstallAllRNG()
+	println("phase2-oci-kernel-boot: UninstallAllRNG: yanked", yanked, "firmware RNG interface(s); LocateProtocol(RNG) will now return NOT_FOUND")
 
 	// LoadImage the kernel bytes. EDK2 parses the PE32+ header and
 	// allocates code/data pages; the EFI-stub entry point becomes
@@ -885,11 +894,8 @@ func runKernelBootLinuxKernel() {
 			println("phase2-oci-kernel-boot: UnpublishInitrd warning:", uerr.Error())
 		}
 	}
-	if rngHandle != 0 {
-		if uerr := uefiboard.UnpublishRNG(rngHandle); uerr != nil {
-			println("phase2-oci-kernel-boot: UnpublishRNG warning:", uerr.Error())
-		}
-	}
+	// M8.9: no PublishRNG to undo (UninstallAllRNG yanks the
+	// firmware's interface but installs no replacement).
 	if status != 0 {
 		if uerr := uefiboard.UnloadImage(handle); uerr != nil {
 			println("phase2-oci-kernel-boot: UnloadImage warning:", uerr.Error())

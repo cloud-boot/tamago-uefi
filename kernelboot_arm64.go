@@ -112,13 +112,27 @@
 //     `earlyprintk` instead of (or in addition to) `earlycon`;
 //   - add `printk.time=y`: kernel `[ x.xxx]` timestamp prefix.
 //
-// R-M8.8a (NEW, OPEN — queued for M8.9): pre-EBS Data Abort
-// during what appears to be a kernel→firmware string/struct
-// callback. Likely candidates: efi_random_alloc for kernel image
-// relocation (calls firmware RNG indirectly), efi_get_memory_map
-// walk over a partially-uninstalled handle, or a runtime services
-// install path. Reproduce via `M81_LIVE_KEEPRUN=1 task
-// kernelboot:live:arm64` then inspect `$WORK/qemu.log`.
+// R-M8.8a (CLOSED 2026-06-10, M8.9): pre-EBS Data Abort
+// downstream of our PublishRNG'd EFI_RNG_PROTOCOL handler.
+// Diagnosis: with PublishRNG ENABLED the abort fires inside the
+// EFI-stub's `efi_random_get_seed()` post-GetRNG flow
+// (install_configuration_table + memory-map walk); with PublishRNG
+// DISABLED but RngDxe still present the abort REVERTS to R-M8.6a
+// inside RngDxe.dll +0x3220. The only path that closes BOTH is
+// "no EFI_RNG_PROTOCOL reachable at all" — UninstallAllRNG yanks
+// the firmware's interface AND skips installing ours, so
+// gBS->LocateProtocol(RNG, NULL, &iface) returns EFI_NOT_FOUND,
+// efi_random_get_seed() takes its `seed_size = 0 + no nvram seed
+// → return early` path, and the EFI-stub continues into "Exiting
+// boot services and installing virtual address map..." (the line
+// immediately preceding ExitBootServices). See the M8.9 entry in
+// cloud-boot/docs/tamago-uefi-phase2-oci-loader.md for the full
+// trace + register dump differential.
+//
+// The kernel's own entropy pool is seeded from CPU + interrupt
+// timing post-boot (random.trust_*=0 cmdline ensures even if RNG
+// were available the EFI seed wouldn't be trusted) — losing the
+// EFI seed is a defence-in-depth concern, not a hard requirement.
 
 //go:build phase2_oci_kernel_boot && tamago && arm64
 
