@@ -44,7 +44,10 @@ func ProbeDTBConfigurationTable() DTBProbeResult {
 		return r
 	}
 
-	// Walk n entries of size 24 bytes each (GUID + VOID*).
+	// Walk n entries of size 24 bytes each (GUID + VOID*). Capture
+	// every GUID into r.AllGUIDs as we go — when DTBFound stays
+	// false, the dump is the only way to see what the firmware
+	// actually exposed (ACPI? SMBIOS? FDT under a different GUID?).
 	for i := uintptr(0); i < n; i++ {
 		entry := cfgTbl + i*efiConfigurationTableEntrySize
 		// VendorGuid is the first 16 bytes; read as an EFIGUID by
@@ -52,14 +55,15 @@ func ProbeDTBConfigurationTable() DTBProbeResult {
 		// same on-wire layout as EFI_GUID (verified by the host-side
 		// tests in efi_events_test.go).
 		g := (*EFIGUID)(unsafe.Pointer(entry))
-		if !guidsEqual(g, &EFIDTBTableGUID) {
-			continue
+		r.AllGUIDs = append(r.AllGUIDs, *g)
+		if guidsEqual(g, &EFIDTBTableGUID) {
+			// VendorTable is the 8 bytes at offset 16.
+			vt := *(*uintptr)(unsafe.Pointer(entry + 16))
+			r.DTBFound = true
+			r.DTBVendorTable = vt
+			// Don't return early — continue to capture remaining
+			// GUIDs into AllGUIDs for the diagnostic dump.
 		}
-		// VendorTable is the 8 bytes at offset 16.
-		vt := *(*uintptr)(unsafe.Pointer(entry + 16))
-		r.DTBFound = true
-		r.DTBVendorTable = vt
-		return r
 	}
 	return r
 }

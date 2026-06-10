@@ -717,6 +717,22 @@ func runKernelBootLinuxKernel() {
 		} else {
 			println("phase2-oci-kernel-boot: DTB probe: EFI_DTB_TABLE_GUID NOT FOUND — kernel will fall back to 'Generating empty DTB'")
 		}
+		// M8.5 diagnostic dump: print every VendorGuid the firmware
+		// exposes. This is how we find out whether the firmware is
+		// publishing ACPI (8868e871-…), SMBIOS (eb9d2d31-… / f2fd1544-…),
+		// or some other table set in place of (or in addition to) the
+		// DTB. With this dump we can decide whether to (a) publish a
+		// DTB ourselves via a future PublishDTB helper or (b) flip the
+		// kernel cmdline to `acpi=force` if the firmware does ship
+		// ACPI tables. Cheap: O(N) prints, N typically < 16.
+		for i, g := range dtb.AllGUIDs {
+			println("phase2-oci-kernel-boot: DTB probe: GUID[",
+				i, "] data1 =", hex32(g.Data1),
+				"data2 =", hex16(g.Data2),
+				"data3 =", hex16(g.Data3),
+				"data4 =", hex8(g.Data4[0]), hex8(g.Data4[1]), hex8(g.Data4[2]), hex8(g.Data4[3]),
+				hex8(g.Data4[4]), hex8(g.Data4[5]), hex8(g.Data4[6]), hex8(g.Data4[7]))
+		}
 	} else {
 		println("phase2-oci-kernel-boot: DTB probe: SystemTable not captured (cpuinit didn't run?) — skipping walk")
 	}

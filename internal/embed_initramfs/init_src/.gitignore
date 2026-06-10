@@ -1,0 +1,6 @@
+# Built artifacts of build.sh — only init.go + build.sh are
+# source. Everything below is regenerated from `./build.sh` and
+# never committed (the produced cpio.gz lives in the parent dir
+# under initramfs.cpio.gz which IS committed).
+/init
+/root/

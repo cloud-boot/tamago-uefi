@@ -124,6 +124,15 @@ type DTBProbeResult struct {
 	// Exposed for diagnostics; consumers (the kernel EFI-stub) walk
 	// the ConfigurationTable themselves, they don't take this from us.
 	DTBVendorTable uintptr
+
+	// AllGUIDs is a snapshot of every VendorGuid encountered during
+	// the walk (in order). Useful for diagnosing the M8.4/M8.5
+	// "DTB GUID not found but firmware should publish one" finding:
+	// dumping this list at probe time lets us see whether the
+	// firmware exposes ACPI (8868e871-…), SMBIOS (eb9d2d31-…), DTB
+	// (b1b621d5-…), or something else entirely. Cheap to capture
+	// (each EFIGUID is 16 bytes; typical N is < 16).
+	AllGUIDs []EFIGUID
 }
 
 // guidsEqual returns true when two EFIGUIDs encode the same 128-bit
