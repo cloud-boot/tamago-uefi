@@ -115,9 +115,10 @@ func PublishInitrd(initrd []byte) (uintptr, error) {
 		return 0, ErrLoadFileRegistryFull
 	}
 	loadFileRegistry[slot] = loadFileEntry{
-		proto: uintptr(unsafe.Pointer(protocol)),
-		body:  uintptr(unsafe.Pointer(&body[0])),
-		size:  uintptr(len(body)),
+		proto:         uintptr(unsafe.Pointer(protocol)),
+		body:          uintptr(unsafe.Pointer(&body[0])),
+		size:          uintptr(len(body)),
+		bodyKeepAlive: body, // R-amd64j: pin via typed reference so GC keeps body alive across the StartImage window
 	}
 
 	// gBS->InstallMultipleProtocolInterfaces signature (UEFI 2.10

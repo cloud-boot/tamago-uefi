@@ -224,8 +224,29 @@ const loadFileRegistrySize = 8
 // in-memory initrd payload the trampoline must copy out on demand.
 type loadFileEntry struct {
 	proto uintptr // address of the published EFI_LOAD_FILE2_PROTOCOL struct (== "this" the firmware passes)
-	body  uintptr // address of byte[0] of the initrd payload
+	body  uintptr // address of byte[0] of the initrd payload (read inside nosplit)
 	size  uintptr // byte length of the initrd payload
+
+	// bodyKeepAlive holds a real Go-typed reference to the same
+	// initrd payload that `body` points at. The trampoline-side
+	// nosplit code reads via `body` (uintptr) to avoid runtime
+	// helpers, but the GC needs a typed slice header to mark the
+	// underlying allocation live across the indefinite window
+	// between PublishInitrd and StartImage's last LoadFile2 callback.
+	//
+	// R-amd64j (2026-06-10): on the three arches without working
+	// async preemption (arm64 / riscv64 / loong64 pre-R-amd64g),
+	// the runtime never runs GC during this window — the registry's
+	// uintptr-only fields accidentally held the body alive because
+	// no GC swept. On amd64 post-R-amd64g + R-amd64h's rxLoop alloc
+	// churn (ErrReceiveTimeout interface boxing at MHz rate), GC
+	// fires before the EFI-stub's second LoadFile2 callback, the
+	// body allocation is collected, and the firmware reads
+	// uninitialised / re-used memory — the kernel then reports
+	// "Initramfs unpacking failed: invalid magic" because the gzip
+	// header at offset 0 is now zeros / overwritten. Adding a
+	// real `[]byte` reference here pins the slice for the GC.
+	bodyKeepAlive []byte
 }
 
 // loadFileRegistry is the package-private array the asm
