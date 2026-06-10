@@ -52,8 +52,25 @@
 #define EFI_BS_ALLOCATEPAGES   40
 
 // EFI_ALLOCATE_TYPE / EFI_MEMORY_TYPE enums (UEFI 2.10 §7.2).
-#define EFI_ALLOCATE_ANY_PAGES  0
-#define EFI_LOADER_DATA         2
+#define EFI_ALLOCATE_ANY_PAGES   0
+#define EFI_LOADER_DATA          2
+#define EFI_BOOT_SERVICES_DATA   4
+
+// R-amd64e H4 probe (2026-06-10): the AllocatePages memory-type
+// argument is EfiBootServicesData (=4), not EfiLoaderData (=2).
+// Rationale: under the patched OVMF (edk2-stable202605 + the three
+// M6.2 image-protection fixes), AllocatePages dispatches through
+// GcdAllocateMemory → CoreUpdateMemoryAttributes, which differentiates
+// by memory type when deciding whether to walk the
+// EFI_LOADED_IMAGE_PROTOCOL slot of the calling image (so the new
+// pages can inherit the loader image's RO/XP attributes). An
+// EfiLoaderData request touches that slot; EfiBootServicesData skips
+// it (kernel-data pages are never loader-image-derived). The R-amd64d
+// register-dump root-cause (RIP = non-canonical Go-prologue bytes
+// from an indirect call vtable dereferenced inside AllocatePages)
+// implicates exactly that kind of code path. See
+// cloud-boot/docs/m6-2-edk2-upstream-investigation.md § 14 (H4)
+// and § 15 (R-amd64e).
 
 TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	// firmware may leave interrupts enabled
@@ -95,7 +112,7 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	// AllocatePages function pointer.
 	MOVQ	EFI_BS_ALLOCATEPAGES(R10), R11
 
-	// MS x64 ABI: AllocatePages(AllocateAnyPages, EfiLoaderData,
+	// MS x64 ABI: AllocatePages(AllocateAnyPages, EfiBootServicesData,
 	// pages, &Memory). Args in RCX, RDX, R8, R9; mandatory 32-byte
 	// shadow space below the return address; 16-byte SP alignment
 	// at the call site.
@@ -103,8 +120,11 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	// We have NO usable Go stack yet (firmware-provided SP is fine
 	// pre-CALL — it's the firmware's own stack and the firmware lets
 	// us use it during boot services). Just reserve the shadow space.
+	//
+	// R-amd64e H4: BootServicesData (=4), not LoaderData (=2). See the
+	// big comment block at the EFI_BOOT_SERVICES_DATA #define above.
 	MOVQ	$EFI_ALLOCATE_ANY_PAGES, CX
-	MOVQ	$EFI_LOADER_DATA, DX
+	MOVQ	$EFI_BOOT_SERVICES_DATA, DX
 	MOVQ	runtime∕goos·RamSize(SB), R8
 	SHRQ	$12, R8					// RamSize >> 12 = page count
 	MOVQ	$·heapBase(SB), R9
