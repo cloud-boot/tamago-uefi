@@ -25,7 +25,7 @@
 // GetMemoryMap probe owns its own `runPhase2Probe` in phase2_probe.go
 // and is mutually exclusive with the M1/M1.5/M1.6/M2/M3/M4 tags at build time.
 
-//go:build (phase2_pcienum || phase2_snpenum || phase2_blkprintk || phase2_virtionet_tx || phase2_ministack_ping || phase2_dhcp4_acquire || phase2_http_get || phase2_https_get || phase2_oci_fetch || phase2_oci_stream_fetch || phase2_oci_cosign_verify || phase2_oci_oras_fetch || phase2_efi_handover || phase2_efi_tiny_handover || phase2_oci_kernel_boot || phase2_dhcp_oci_menu) && !phase2_probe
+//go:build (phase2_pcienum || phase2_snpenum || phase2_blkprintk || phase2_virtionet_tx || phase2_ministack_ping || phase2_dhcp4_acquire || phase2_http_get || phase2_https_get || phase2_oci_fetch || phase2_oci_stream_fetch || phase2_oci_cosign_verify || phase2_oci_oras_fetch || phase2_efi_handover || phase2_efi_tiny_handover || phase2_oci_kernel_boot || phase2_dhcp_oci_menu || phase3_oci_freebsd_boot) && !phase2_probe
 
 package main
 
@@ -63,5 +63,6 @@ func runPhase2Probe() {
 	runEFITinyHandoverProbe()
 	runOCIKernelBootProbe()
 	runDHCPOCIMenuProbe()
+	runOCIFreeBSDBootProbe()
 	runBlkPrintkTeardown()
 }
