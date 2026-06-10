@@ -37,15 +37,15 @@ import (
 // CPU is this board's processor instance (timer/RNG/feature state).
 var CPU = &amd64.CPU{}
 
-// RamSize: 128 MiB (was 704 MiB on main bare-metal). The H6 cpuinit
-// passes (RamSize >> 12) as the AllocatePages page-count argument
-// (RaiseTPL-bracketed in this sprint, see cpuinit_amd64.s); 128 MiB
-// = 32768 pages, well within OVMF's free-page pool on -m 2048. Also
-// matches arm64 / riscv64 / loong64 board files for cross-arch
-// consistency.
+// RamSize: 704 MiB. amd64 UEFI typically loads the image low so the
+// region [text-64KiB, +RamSize) fits comfortably with QEMU -m 2048
+// (for HTTP-original + EFIHANDOVER-original; the larger HTTPS / OCI
+// images load higher in RAM and the +704MiB heap overflows past the
+// `0x80000000` PCI MMIO hole — that's the R-amd64a baseline #PF and
+// is tracked separately, see § 14.5/§ 15).
 //
 //go:linkname ramSize runtime/goos.RamSize
-var ramSize uint64 = 0x08000000
+var ramSize uint64 = 0x2c000000
 
 //go:linkname nanotime runtime/goos.Nanotime
 func nanotime() int64 {
