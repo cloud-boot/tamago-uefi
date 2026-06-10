@@ -174,7 +174,29 @@ func (s *Stack) dialTLSOnce(host string, port uint16, dnsServer net.IP, timeout 
 	if timeout <= 0 {
 		timeout = defaultDialTimeout
 	}
-	deadline := time.Now().Add(timeout)
+
+	// R-amd64i fix: do NOT use `time.Now().Add(timeout)` + `time.Until(...)`
+	// to subdivide the wall-clock budget across ResolveA + DialTCP4. On
+	// TamaGo amd64 (post R-amd64g, with async preemption live), consecutive
+	// `time.Now()` reads can step forward by minutes between calls — the
+	// monotonic clock source is not stable across goroutine scheduling.
+	// Empirically the second `time.Until(deadline)` in this function
+	// returned -16m36s on a deadline set 15s in the future just lines
+	// earlier, which gated the SYN before it could fire (pcap confirmed
+	// zero TCP/443 packets on the wire across the entire 90 s run).
+	// The split-budget pattern works on arm64/riscv64/loong64 only
+	// because those arches don't run rxLoop concurrently (no async
+	// preemption yet) — the deadline math executes without an
+	// intervening reschedule.
+	//
+	// Fix: pass the per-call `timeout` straight to ResolveA and DialTCP4.
+	// Each stage has its own internal timeout handling (DNS via
+	// newDeadlineChecker, TCP4 via the dial loop). The caller's
+	// retry-with-backoff still bounds the cumulative wall-clock; the
+	// budget split was a refinement, not a correctness requirement.
+	// SetDeadline on the underlying TCP conn (driving the TLS handshake
+	// reads) is now computed fresh via time.Now() ONCE, post-dial — same
+	// pattern HTTPGet uses, which is known-green on amd64.
 
 	// Resolve the host. Skip DNS for IP-literal hosts.
 	var ip net.IP
@@ -188,22 +210,14 @@ func (s *Stack) dialTLSOnce(host string, port uint16, dnsServer net.IP, timeout 
 		if dnsServer == nil {
 			return nil, ErrDNSInvalidServer
 		}
-		resolveBudget := time.Until(deadline)
-		if resolveBudget <= 0 {
-			return nil, ErrTCP4Timeout
-		}
 		var err error
-		ip, err = s.ResolveA(host, dnsServer, resolveBudget)
+		ip, err = s.ResolveA(host, dnsServer, timeout)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	dialBudget := time.Until(deadline)
-	if dialBudget <= 0 {
-		return nil, ErrTCP4Timeout
-	}
-	tcpConn, err := s.DialTCP4(ip, port, dialBudget)
+	tcpConn, err := s.DialTCP4(ip, port, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -214,9 +228,11 @@ func (s *Stack) dialTLSOnce(host string, port uint16, dnsServer net.IP, timeout 
 		return nil, err
 	}
 
-	// Propagate the wall-clock deadline to the TCP conn so the
-	// inline reads driven by tls.Handshake honour it.
-	_ = tcpConn.SetDeadline(deadline)
+	// Propagate a fresh per-call deadline to the TCP conn so the
+	// inline reads driven by tls.Handshake honour it. Computed here
+	// (post-dial) via one `time.Now()` read to avoid the cross-stage
+	// drift that gated R-amd64i.
+	_ = tcpConn.SetDeadline(time.Now().Add(timeout))
 	tlsConn := tls.Client(tcpConn, cfg)
 	if err := tlsConn.Handshake(); err != nil {
 		_ = tcpConn.Close()
