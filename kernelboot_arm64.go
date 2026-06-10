@@ -36,6 +36,34 @@
 //   4. loglevel=8 for verbose kernel printk in the live test log.
 //   5. panic=10 so a panic-on-init-exit auto-reboots and QEMU
 //      exits cleanly inside the test timeout instead of hanging.
+//
+// M8.7 RNG cmdline workaround (2026-06-10) — R-M8.6a
+//
+// After M8.6 closed (DTB published; EFI-stub reached "Using DTB
+// from configuration table" + "Loaded initrd from
+// LINUX_EFI_INITRD_MEDIA_GUID device path"), the next observed
+// failure was a Data Abort inside EDK2's `RngDxe.dll` on the
+// kernel's RETRY of `efi_get_random_bytes`. The first call
+// returned EFI_INVALID_PARAMETER cleanly; the kernel then retried
+// (KASLR seed gather) and the retry path null-deref'd inside
+// RngDxe. Approach A: disable every kernel path that calls into
+// EFI_RNG_PROTOCOL so the abort can never be triggered.
+//
+//   - nokaslr                  : disable KASLR (the main caller of
+//                                efi_get_random_bytes from the
+//                                EFI stub).
+//   - random.trust_bootloader=0: don't seed the entropy pool from
+//                                any EFI/bootloader RNG.
+//   - random.trust_cpu=0       : don't seed from CPU RNG either —
+//                                belt + braces in case the kernel
+//                                re-enters efi_get_random_bytes
+//                                via random_init().
+//
+// If approach A is insufficient (the kernel retries despite the
+// trust= knobs), the fallback is approach B: publish our own
+// EFI_RNG_PROTOCOL (GUID 3152bca5-eade-433d-862e-c01cdc291f44)
+// backed by crypto/rand so the FIRST call succeeds and no retry
+// happens. Approach C is upstream-Linux investigation.
 
 //go:build phase2_oci_kernel_boot && tamago && arm64
 
@@ -47,7 +75,8 @@ var (
 		"earlycon=pl011,mmio32,0x9000000 " +
 		"acpi=force " +
 		"root=/dev/ram0 rdinit=/init " +
-		"loglevel=8 panic=10"
+		"loglevel=8 panic=10 " +
+		"nokaslr random.trust_bootloader=0 random.trust_cpu=0"
 	kernelBootInitrdRef         = ""
 	kernelBootUseEmbeddedInitrd = true
 )

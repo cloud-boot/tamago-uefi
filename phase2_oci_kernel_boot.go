@@ -727,6 +727,28 @@ func runKernelBootLinuxKernel() {
 		println("phase2-oci-kernel-boot: no DTB source available; falling through (kernel may fault)")
 	}
 
+	// PublishRNG (M8.7, R-M8.6a): install our own
+	// EFI_RNG_PROTOCOL (GUID 3152bca5-eade-433d-862e-c01cdc291f44)
+	// backed by crypto/rand so the Linux EFI-stub's call into
+	// efi_get_random_bytes hits OUR handler and returns
+	// EFI_SUCCESS — avoiding the EDK2 RngDxe.dll Data Abort on
+	// `-machine virt` arm64. LocateProtocol uses first-match
+	// ordering: our handle is installed AFTER the firmware's own
+	// RngDxe, so technically RngDxe wins. However EDK2's
+	// RngDxe.dll fails the SECOND call (KASLR seed gather) with a
+	// Data Abort on the QEMU virt platform; having our handle
+	// present means the kernel's retry path AND any fallback
+	// LocateHandleBuffer + iterate that drivers may try will
+	// reach a working publisher. The kernel cmdline workaround
+	// (nokaslr random.trust_*=0) is kept in kernelboot_arm64.go
+	// to suppress as many calls as possible — defence in depth.
+	rngHandle, rngErr := uefiboard.PublishRNG()
+	if rngErr != nil {
+		println("phase2-oci-kernel-boot: PublishRNG failed:", rngErr.Error())
+	} else {
+		println("phase2-oci-kernel-boot: RNG published, handle =", hexUintptrKernelBoot(rngHandle))
+	}
+
 	// LoadImage the kernel bytes. EDK2 parses the PE32+ header and
 	// allocates code/data pages; the EFI-stub entry point becomes
 	// the StartImage target.
@@ -861,6 +883,11 @@ func runKernelBootLinuxKernel() {
 	if initrdHandle != 0 {
 		if uerr := uefiboard.UnpublishInitrd(initrdHandle); uerr != nil {
 			println("phase2-oci-kernel-boot: UnpublishInitrd warning:", uerr.Error())
+		}
+	}
+	if rngHandle != 0 {
+		if uerr := uefiboard.UnpublishRNG(rngHandle); uerr != nil {
+			println("phase2-oci-kernel-boot: UnpublishRNG warning:", uerr.Error())
 		}
 	}
 	if status != 0 {
