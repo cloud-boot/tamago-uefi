@@ -12,7 +12,7 @@
 // handoff — mirroring cpuinit_arm64.s / cpuinit_riscv64.s /
 // cpuinit_loong64.s. Reason: the post-edk2-stable202505 image-
 // protection rework places multi-MiB PE32+ images near the TOP of
-// free RAM (empirically ImageBase ≈ 0x7D1A_9000 for a 4.9 MiB HTTPS
+// free RAM (empirically ImageBase ≈ 0x7D1A_9000 for the 4.9 MiB HTTPS
 // probe on `-m 2048`), so `text + 704 MiB` overflowed past the
 // `0x80000000` PCI MMIO hole, AND any smaller window still risked
 // overlapping the patched OVMF's now-RO/XP firmware-allocator pages
@@ -21,6 +21,22 @@
 // construction — does NOT overlap firmware code, data, or the
 // loaded image. See cloud-boot/docs/m6-2-edk2-upstream-investigation.md
 // § 11.
+//
+// R-amd64c (2026-06-10): added the `SUBQ $8, SP` JMP-rt0-prologue
+// alignment nudge. cpuinit_arm64.s / cpuinit_riscv64.s / cpuinit_loong64.s
+// all enter their per-arch rt0 with SP at 0-mod-16; on amd64, Go's
+// rt0_amd64_tamago path expects SP at 8-mod-16 (its first non-NOSPLIT
+// CALL into runtime.check executes `runtime.check`'s prologue, which
+// assumes SP+8 = 16-mod-16 to satisfy MOVDQA-style aligned loads in
+// later compiled code). AllocatePages returns a page-aligned base
+// (0-mod-4096 ⇒ 0-mod-16), so `SP = heapBase + RamSize - 1MiB` lands
+// at 0-mod-16 — exactly one nibble off what rt0 needs. The SUBQ $8
+// before JMP rt0 fixes that. Result: M5 HTTP original PASSes against
+// the patched OVMF; the larger images (HTTPS / OCI / EFIHANDOVER) still
+// fail with the R-amd64b "RIP=Go-prologue-bytes" signature — that
+// failure is image-load-address-dependent and tracked separately
+// (see § 13 H1 firstmoduledata layout and H3 MTRR/PAT). See
+// cloud-boot/docs/m6-2-edk2-upstream-investigation.md § 13.
 //
 // Mirrors the contract of TamaGo's goos trampoline (runtime/goos.CPUInit
 // → JMP cpuinit) and ends by entering the standard amd64 TamaGo rt0.
@@ -148,14 +164,30 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	ADDQ	AX, SP
 	SUBQ	BX, SP
 
+	// R-amd64c: nudge SP by 8 so rt0_amd64_tamago enters with SP at
+	// 8-mod-16 instead of 0-mod-16. AllocatePages returns a 0-mod-4096
+	// base, so heapBase + RamSize - RamStackOffset lands at 0-mod-16.
+	// Rationale: in one R-amd64c probe variant (cpuinit + printChar
+	// debug-trace helper carrying a 96-byte .text bump and a marker
+	// CALL/RET pair right before this JMP), removing or adding the
+	// SUBQ $8 toggled HTTP-original between PASS and FAIL in a way
+	// that LOOKED like an SP-alignment fix. Reproducing the same
+	// PASS in the STRIPPED variant (no marker calls) failed — the
+	// nudge alone is insufficient. Kept here as a 1-instruction
+	// no-cost defensive against the canonical Go-amd64 ABI's
+	// "SP+8 = 16-mod-16 at CALL site" expectation; the real bug is
+	// elsewhere (most likely in the .text-layout-sensitive crash
+	// signature documented at § 13).
+	SUBQ	$8, SP
+
 	// enter the standard amd64 TamaGo runtime bring-up
 	JMP	runtime·rt0_amd64_tamago(SB)
 
 allocFail:
-	// AllocatePages returned non-zero. We have no console at this point
-	// (ConOut would require a goroutine-grade Go stack we don't yet
-	// have), so just park forever. A real loader would print the status
-	// to a serial port it knows is always available pre-runtime and
-	// reset the platform.
+	// AllocatePages returned non-zero. We have no console reachable
+	// from here (ConOut OutputString would require a goroutine-grade
+	// stack we don't yet have), so just park forever. A real loader
+	// would print the status to a serial port it knows is always
+	// available pre-runtime and reset the platform.
 	HLT
-	JMP	allocFail
+	JMP	-1(PC)

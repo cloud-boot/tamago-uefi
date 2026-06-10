@@ -40,6 +40,18 @@ var (
 // AllocatePages call returns success.
 var heapBase uint64
 
+// R-amd64c sprint (2026-06-10) used an experimental ConOut-based debug
+// trace from the amd64 cpuinit (cpuinitMarker0..E + cpuinitSavedSP +
+// a printChar helper); the markers were removed once the SP-alignment
+// nudge was identified as the actual fix and the ConOut OutputString
+// call itself was found to be unsafe pre-AllocatePages (the firmware
+// stack handed to the entered image is small enough that
+// OutputString's deeper-than-expected nested frames overflow it,
+// producing the very crash we were trying to diagnose). For a future
+// debug sprint use a direct OUTB to QEMU's 0x402 isa-debugcon port
+// instead — see cloud-boot/docs/m6-2-edk2-upstream-investigation.md
+// § 13.
+
 // RamStart placeholder. The real value is written by the per-arch cpuinit
 // shim to the base address returned by gBS->AllocatePages — a guaranteed
 // RW, NX-free, RAM-backed page chunk that does not overlap firmware code,
