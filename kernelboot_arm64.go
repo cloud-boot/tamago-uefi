@@ -2,177 +2,93 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //
 // Per-arch kernel-boot constants for arm64 (M8.3 per-arch split,
-// 2026-06-10). Documentation for each variable lives next to its
-// shared consumer in phase2_oci_kernel_boot.go.
+// 2026-06-10; M8.13 Debian-13 unification, 2026-06-10). Documentation
+// for each variable lives next to its shared consumer in
+// phase2_oci_kernel_boot.go.
 //
-// Arm64 is the ONLY arch with a validated public EFI-stub kernel OCI
-// artifact in M8.3: ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc
-// (multi-arch index, anonymous bearer-token pull). The per-arch
-// manifest's first layer is a tar.gz containing boot/vmlinuz as a
-// PE32+ image with MZ + 'ARMd' magic at offset 0x38 and machine type
-// 0xaa64. Verified end-to-end against the artifact pulled
-// 2026-06-09 (commit 00bc8f0).
+// M8.13 — Debian-13 unification across all 4 arches (2026-06-10)
 //
-// M8.5 cmdline notes (2026-06-10)
+// Until M8.12 the arm64 wiring pulled Talos 5.10.29 (2021) from
+// `ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc`, which
+// required a `-cpu cortex-a72` QEMU pin (M8.10, R-M8.9a) because
+// the kernel was too old to gate the modern CPU features `-cpu max`
+// exposes on QEMU 9.x (SVE2, FEAT_RNG, FEAT_HCX, …) and crashed in
+// head.S before VBAR_EL1 was installed. riscv64 (M8.11) + loong64
+// (M8.12) already used cloud-boot-self-published EFI-stub kernels
+// extracted from Debian 13 .deb packages by
+// `cmd/cloudboot-oci-extract`, with ZERO per-arch QEMU tweaks. M8.13
+// extends that scheme to arm64 (and amd64) for a fully consistent
+// matrix:
 //
-// The M8.5 DTB-probe enhancement (GUID dump) showed that EDK2's
-// arm64 firmware on -machine virt publishes ACPI 2.0 tables under
-// `8868e871-e4f1-11d3-bc22-0080c73c8881` but does NOT publish a DTB
-// under EFI_DTB_TABLE_GUID. The Linux EFI-stub therefore falls
-// back to "Generating empty DTB", which has no UART node, so the
-// post-EFI-stub kernel cannot find ttyAMA0 by symbolic name and
-// goes silent (and then trips a firmware Data Abort because the
-// empty DTB has no PSCI/ACPI roots either).
+//   - Source: Debian 13 `linux-signed-arm64` (trixie) signed kernel
+//     package, /boot/vmlinuz-6.12.90+deb13.1-arm64, extracted as a
+//     PE32+ EFI-stub binary (MZ + ARMd magic + COFF Machine 0xaa64).
+//   - Published at ttl.sh/cloudboot-vmlinuz-arm64:24h, re-pushed
+//     nightly by .github/workflows/vmlinuz-nightly.yml alongside
+//     riscv64+loong64+amd64.
+//   - Modern kernel handles `-cpu max` cleanly: no more cortex-a72
+//     pin needed in internal/livekernelboot/run.sh (M8.13 reverts
+//     the M8.10 workaround).
 //
-// To work around without having to publish a DTB ourselves (a much
-// larger M8.6 task), we:
-//   1. Force ACPI discovery via `acpi=force` — tells the kernel to
-//      use the ACPI 2.0 tables EDK2 already publishes.
-//   2. Hardcode the QEMU virt PL011 UART MMIO base in earlycon so
-//      the kernel can talk to the serial before any device-tree /
-//      ACPI walk has run.
-//   3. Set root=/dev/ram0 + rdinit=/init so the kernel knows its
-//      rootfs is the initramfs ramdisk and where to find PID 1.
-//   4. loglevel=8 for verbose kernel printk in the live test log.
-//   5. panic=10 so a panic-on-init-exit auto-reboots and QEMU
-//      exits cleanly inside the test timeout instead of hanging.
+// Cmdline rebased onto the riscv64/loong64 baseline, retaining only
+// the arm64 console specifics and the M8.8 post-EBS-serial-routing
+// clean-up:
 //
-// M8.7 RNG cmdline workaround (2026-06-10) — R-M8.6a
+//   - console=ttyAMA0,115200  : QEMU virt PL011 UART (kernel side).
+//   - earlycon=pl011,mmio32,0x9000000 : earlycon before DTB walk.
+//   - keep_bootcon            : keep earlycon alive until ttyAMA0 is
+//                               fully registered (M8.8).
+//   - earlyprintk=keep        : earlyprintk symmetry (M8.8).
+//   - printk.time=y           : `[ x.xxx]` timestamp prefix (M8.8).
+//   - root=/dev/ram0 rdinit=/init : initramfs ramdisk + PID 1.
+//   - loglevel=8 panic=10     : verbose printk + auto-reboot.
 //
-// After M8.6 closed (DTB published; EFI-stub reached "Using DTB
-// from configuration table" + "Loaded initrd from
-// LINUX_EFI_INITRD_MEDIA_GUID device path"), the next observed
-// failure was a Data Abort inside EDK2's `RngDxe.dll` on the
-// kernel's RETRY of `efi_get_random_bytes`. The first call
-// returned EFI_INVALID_PARAMETER cleanly; the kernel then retried
-// (KASLR seed gather) and the retry path null-deref'd inside
-// RngDxe. Approach A: disable every kernel path that calls into
-// EFI_RNG_PROTOCOL so the abort can never be triggered.
+// DROPPED from the M8.10 cmdline (Debian 6.12.90 doesn't trip the
+// 5.10/Talos failure modes the workarounds were for):
 //
-//   - nokaslr                  : disable KASLR (the main caller of
-//                                efi_get_random_bytes from the
-//                                EFI stub).
-//   - random.trust_bootloader=0: don't seed the entropy pool from
-//                                any EFI/bootloader RNG.
-//   - random.trust_cpu=0       : don't seed from CPU RNG either —
-//                                belt + braces in case the kernel
-//                                re-enters efi_get_random_bytes
-//                                via random_init().
+//   - `nokaslr random.trust_bootloader=0 random.trust_cpu=0` — these
+//     existed to avoid the RngDxe Data Abort (R-M8.6a). The
+//     uefiboard.UninstallAllRNG firmware-side fix (M8.9) closes the
+//     abort directly; the cmdline knobs are belt-and-braces only
+//     and add no value on a 6.12 kernel. If RngDxe somehow returns,
+//     re-add. (M8.13 verifies empirically — live test ran clean.)
 //
-// If approach A is insufficient (the kernel retries despite the
-// trust= knobs), the fallback is approach B: publish our own
-// EFI_RNG_PROTOCOL (GUID 3152bca5-eade-433d-862e-c01cdc291f44)
-// backed by crypto/rand so the FIRST call succeeds and no retry
-// happens. Approach C is upstream-Linux investigation.
+// PRESERVED from M8.6 (still required):
 //
-// M8.8 post-EBS serial routing — cmdline cleanup + new pre-EBS
-// crash uncovered (2026-06-10)
+//   - PublishDTB in MODE C — EDK2 arm64 firmware on -machine virt
+//     publishes ACPI 2.0 + SMBIOS but no DTB. The Linux EFI-stub
+//     would generate an empty DTB and null-deref. We still install
+//     our embedded QEMU-virt DTB under EFI_DTB_TABLE_GUID.
+//   - UninstallAllRNG in MODE C (M8.9) — yanks the firmware
+//     RngDxe handle so efi_random_get_seed() takes the
+//     EFI_NOT_FOUND early-exit path; without this we hit the
+//     pre-EBS Data Abort regardless of cmdline.
 //
-// After M8.7 the EFI-stub trace ended cleanly on
-// "Loaded initrd from LINUX_EFI_INITRD_MEDIA_GUID device path"
-// followed by ~180s silence to the watchdog (treated as PASS by
-// the existing runner gates). M8.8 investigation: ran the live
-// test with M81_LIVE_KEEPRUN=1 and inspected the full qemu log
-// past the runner's "kernel-side output" marker. Found:
+// Verify-the-kernel one-shot manual re-publish (if cron is stale):
 //
-//   Synchronous Exception at 0x000000013C0FF9DC
-//   ESR 0x96000047  FAR 0x0000000000000040
-//   ASSERT [ArmCpuDxe] DefaultExceptionHandler.c(343): 0==1
+//   /tmp/cb-extract/cloudboot-oci-extract \
+//     -src 'deb:https://deb.debian.org/debian/pool/main/l/linux-signed-arm64/linux-image-6.12.90+deb13.1-arm64_6.12.90-2_arm64.deb' \
+//     -arch arm64 \
+//     -dst 'ttl.sh/cloudboot-vmlinuz-arm64:24h' \
+//     -cmdline-hint 'console=ttyAMA0,115200 earlycon=pl011,mmio32,0x9000000'
 //
-// FAR=0x40 + ESR=0x96000047 = Translation fault, third level (a
-// null+0x40 deref). ELR lands inside the EDK2 DXE region, so the
-// fault fires WHILE EDK2 boot services are still active — i.e.
-// the kernel/EFI-stub is calling into a firmware service that
-// dereferences a null string or struct pointer at offset 0x40.
-// This is therefore PRE-ExitBootServices: zero kernel `[ x.xxx]`
-// output ever reaches the PL011 because the kernel never actually
-// transitions to its own console subsystem.
-//
-// QEMU side: `-serial stdio` IS routing PL011 to the runner — the
-// EFI-stub's 4 lines reach us cleanly, proving the chardev path
-// works. The blocker is 100% kernel↔firmware: a new pre-EBS Data
-// Abort tracked as R-M8.8a (different LR than M8.6a's RngDxe;
-// PublishRNG already neutralised the firmware's RngDxe handle).
-//
-// Cmdline cleanup landed in M8.8 (these stay even though they
-// don't unblock R-M8.8a — they're correct on their own merits and
-// will let post-EBS output flow the moment R-M8.8a is unblocked
-// in M8.9):
-//   - drop `acpi=force`: M8.6 PublishDTB now installs a proper
-//     QEMU-virt DTB under EFI_DTB_TABLE_GUID with pl011@9000000 +
-//     serial0 alias + chosen/stdout-path; with BOTH `acpi=force`
-//     AND a DTB present the kernel was picking ACPI (EDK2's
-//     MADT/GTDT has no PL011 UART description) — so even if the
-//     pre-EBS crash were fixed, the late console hand-off from
-//     earlycon to ttyAMA0 would silently never initialise. Drop
-//     the override; kernel auto-picks DTB when present;
-//   - add `keep_bootcon`: keep earlycon alive until ttyAMA0 is
-//     fully registered;
-//   - add `earlyprintk=keep`: symmetry for kernels that gate on
-//     `earlyprintk` instead of (or in addition to) `earlycon`;
-//   - add `printk.time=y`: kernel `[ x.xxx]` timestamp prefix.
-//
-// R-M8.8a (CLOSED 2026-06-10, M8.9): pre-EBS Data Abort
-// downstream of our PublishRNG'd EFI_RNG_PROTOCOL handler.
-// Diagnosis: with PublishRNG ENABLED the abort fires inside the
-// EFI-stub's `efi_random_get_seed()` post-GetRNG flow
-// (install_configuration_table + memory-map walk); with PublishRNG
-// DISABLED but RngDxe still present the abort REVERTS to R-M8.6a
-// inside RngDxe.dll +0x3220. The only path that closes BOTH is
-// "no EFI_RNG_PROTOCOL reachable at all" — UninstallAllRNG yanks
-// the firmware's interface AND skips installing ours, so
-// gBS->LocateProtocol(RNG, NULL, &iface) returns EFI_NOT_FOUND,
-// efi_random_get_seed() takes its `seed_size = 0 + no nvram seed
-// → return early` path, and the EFI-stub continues into "Exiting
-// boot services and installing virtual address map..." (the line
-// immediately preceding ExitBootServices). See the M8.9 entry in
-// cloud-boot/docs/tamago-uefi-phase2-oci-loader.md for the full
-// trace + register dump differential.
-//
-// The kernel's own entropy pool is seeded from CPU + interrupt
-// timing post-boot (random.trust_*=0 cmdline ensures even if RNG
-// were available the EFI seed wouldn't be trusted) — losing the
-// EFI seed is a defence-in-depth concern, not a hard requirement.
+// Historical Talos pin (M8.3 → M8.12): obsolete. Left in the
+// changelog under M8.13 in cloud-boot/docs/tamago-uefi-phase2-oci-loader.md
+// for posterity. The M8.10 `-cpu cortex-a72` comment block previously
+// at the top of kernelBootCmdline is now in
+// internal/livekernelboot/run.sh's M8.13 reverse-fix block.
 
 //go:build phase2_oci_kernel_boot && tamago && arm64
 
 package main
 
 var (
-	kernelBootTargetRef = "https://ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc"
-	// M8.10 (R-M8.9a) ROOT CAUSE for post-EBS silence (2026-06-10)
-	//
-	// After M8.9 closed (UninstallAllRNG cleared the pre-EBS Data
-	// Abort), EFI-stub trace reached "Exiting boot services and
-	// installing virtual address map..." then ZERO bytes on PL011.
-	//
-	// Bisection by booting the same Talos kernel directly via
-	// QEMU `-kernel` (bypassing our EFI loader entirely):
-	//   - With `-cpu max`         : ZERO bytes on PL011.
-	//   - With `-cpu cortex-a72`  : 517 lines of clean kernel log.
-	//
-	// Linux 5.10.29 (the kernel pinned by the OCI ref) doesn't
-	// know how to gate the modern CPU features `-cpu max` exposes
-	// on QEMU 9.x (SVE2, FEAT_RNG, FEAT_HCX, …) and crashes very
-	// early in head.S before VBAR_EL1 is installed. The stale
-	// firmware IRQ vector then re-enters itself on every timer
-	// tick (visible under `-d int,unimp,guest_errors`).
-	//
-	// Fix: pin `-cpu cortex-a72` in the QEMU runner. Cmdline
-	// returns to the M8.8 baseline — none of the cmdline tweaks
-	// (n8 baud, debug, ignore_loglevel, hvc0 pivot, etc.) made
-	// any difference because the kernel was never running far
-	// enough to read its console= argument.
-	//
-	// Embedded DTB inspection (dtc -I dtb -O dts) confirmed a
-	// clean pl011@9000000 + chosen/stdout-path = "/pl011@9000000"
-	// + serial0 alias. DTB was correct all along.
-	kernelBootCmdline = "console=ttyAMA0,115200 " +
+	kernelBootTargetRef = "https://ttl.sh/cloudboot-vmlinuz-arm64:24h"
+	kernelBootCmdline   = "console=ttyAMA0,115200 " +
 		"earlycon=pl011,mmio32,0x9000000 keep_bootcon earlyprintk=keep " +
 		"printk.time=y " +
 		"root=/dev/ram0 rdinit=/init " +
-		"loglevel=8 panic=10 " +
-		"nokaslr random.trust_bootloader=0 random.trust_cpu=0"
+		"loglevel=8 panic=10"
 	kernelBootInitrdRef         = ""
 	kernelBootUseEmbeddedInitrd = true
 )

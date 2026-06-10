@@ -1,8 +1,11 @@
 # Copyright 2026 The cloud-boot Authors.
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# Nightly republish of the riscv64 + loong64 EFI-stub vmlinuz OCI
-# artifacts referenced by kernelboot_riscv64.go / kernelboot_loong64.go.
+# Nightly republish of the riscv64 + loong64 + arm64 + amd64 EFI-stub
+# vmlinuz OCI artifacts referenced by kernelboot_<arch>.go for all
+# four arches. M8.13 (2026-06-10) added arm64 + amd64 to the fan-out;
+# until then arm64 used the (stale) ghcr.io/siderolabs/kernel ref and
+# amd64 was DORMANT.
 #
 # Why: ttl.sh tags expire 24h after the last push. Without this cron
 # the live M8.4 MODE C demo breaks daily. This workflow re-extracts
@@ -69,6 +72,21 @@ jobs:
             ttl_dst: 'ttl.sh/cloudboot-vmlinuz-loong64:24h'
             ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-loong64:latest'
             cmdline_hint: 'console=ttyS0,115200'
+          # M8.13 (2026-06-10): unify arm64 + amd64 on Debian 13.
+          # signed source pool: linux-signed-<arch> ships the
+          # `/boot/vmlinuz-*` EFI-stub binary the loader expects;
+          # unsigned `linux-image-*-unsigned` is a kbuild template
+          # without the actual vmlinuz, hence the -signed- choice.
+          - arch: arm64
+            src: 'deb:https://deb.debian.org/debian/pool/main/l/linux-signed-arm64/linux-image-6.12.90+deb13.1-arm64_6.12.90-2_arm64.deb'
+            ttl_dst: 'ttl.sh/cloudboot-vmlinuz-arm64:24h'
+            ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-arm64:latest'
+            cmdline_hint: 'console=ttyAMA0,115200 earlycon=pl011,mmio32,0x9000000'
+          - arch: amd64
+            src: 'deb:https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/linux-image-6.12.90+deb13.1-amd64_6.12.90-2_amd64.deb'
+            ttl_dst: 'ttl.sh/cloudboot-vmlinuz-amd64:24h'
+            ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-amd64:latest'
+            cmdline_hint: 'console=ttyS0,115200 earlyprintk=ttyS0,115200'
 
     steps:
       - name: Checkout

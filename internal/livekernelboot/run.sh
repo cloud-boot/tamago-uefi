@@ -131,42 +131,37 @@ mcopy -i "$ESP" "$NSH_PATH" "::/startup.nsh"
 case "$ARCH" in
     arm64)
         # M8.3: arm64 runs MODE C (real-registry streaming) and needs
-        # outbound networking to ghcr.io. The other arches stay on
+        # outbound networking to ttl.sh. The other arches stay on
         # MODE B (self-test) and don't need a netdev.
         #
-        # M8.10 (R-M8.9a) ROOT CAUSE for post-EBS silence (2026-06-10)
+        # M8.13 — REVERSE-FIX of M8.10's `-cpu cortex-a72` pin
+        # (2026-06-10)
         #
-        # After M8.9 closed the pre-EBS Data Abort, the EFI-stub
-        # reached a clean "Exiting boot services and installing
-        # virtual address map..." then ZERO bytes — not a glyph,
-        # not an ANSI escape. `-d int,unimp,guest_errors` showed
-        # the CPU stuck in a tight IRQ loop with every timer tick
-        # vectored to EDK2's stale IVT at EL1 PC 0x13fd5f280,
-        # never reaching the kernel's exception vectors.
+        # Historical: M8.10 (R-M8.9a) pinned `-cpu cortex-a72`
+        # because the Talos 5.10.29 kernel (from 2021) crashed
+        # in early head.S under `-cpu max` on QEMU 9.x — it
+        # couldn't gate the modern CPU features (SVE2, FEAT_RNG,
+        # FEAT_HCX, …) and faulted before VBAR_EL1 was installed.
+        # The stale firmware IVT then re-entered itself on every
+        # timer tick.
         #
-        # Bisected by booting the same kernel directly via QEMU
-        # `-kernel` (bypassing our EFI loader entirely). Same
-        # silence. The kernel's `-cpu` choice was the variable:
+        # M8.13 swaps the underlying kernel to Debian 13's
+        # 6.12.90+deb13.1-arm64 (extracted by cmd/cloudboot-oci-
+        # extract and re-published to ttl.sh/cloudboot-vmlinuz-
+        # arm64:24h; see kernelboot_arm64.go M8.13 block). The
+        # Debian 6.12 kernel gates every CPU feature QEMU 9.x
+        # exposes — same as the riscv64 6.12.90 and loong64
+        # 7.0.12 kernels already shipped in M8.11/M8.12. No
+        # `-cpu` pin needed; `-cpu max` works cleanly.
         #
-        #   -cpu max         : ZERO output post-Booting Linux.
-        #   -cpu cortex-a57  : 517 lines of clean kernel log.
-        #
-        # The Talos kernel pinned by the OCI ref
-        # ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc is
-        # Linux 5.10.29 (from 2021-05-14). `-cpu max` on QEMU 9.x
-        # exposes CPU features (SVE2, FEAT_RNG, FEAT_HCX, …) that
-        # this old kernel doesn't know how to gate, and it crashes
-        # in very early head.S before VBAR_EL1 is set up. The
-        # stale firmware IVT then loops on every timer tick.
-        #
-        # Fix: pin `-cpu cortex-a72` — a real-world arm64 SoC
-        # CPU that the 5.10 kernel was actually tested against
-        # (Raspberry Pi 4, AWS Graviton 1 family), present in
-        # QEMU since forever, and exposes no surprise features.
-        # cortex-a57 also works but a72 is closer to what real
-        # Talos arm64 deployments target.
+        # Using `-cpu max` instead of `host` because the live
+        # tests run inside QEMU TCG on the maintainer's macOS
+        # workstation — `host` requires HVF/KVM acceleration
+        # which we don't enable. `max` exposes the maximal TCG-
+        # emulated feature set without needing accelerated
+        # backends.
         QEMU_ARGS=(
-            -machine virt -cpu cortex-a72 -m 4096
+            -machine virt -cpu max -m 4096
             -display none -no-reboot
             -bios "$FW_CODE"
             -drive "file=$ESP,format=raw,if=none,id=esp"
