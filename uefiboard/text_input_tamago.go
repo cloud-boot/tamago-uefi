@@ -6,9 +6,11 @@
 // Reads one keystroke from gST->ConIn->ReadKeyStroke in non-blocking
 // mode. Used by the M9.2 menu loop to advance the selection cursor on
 // arrow keys, confirm with Enter, or cancel with ESC. The loop polls
-// in 100 ms ticks (via time.Sleep, not gBS->WaitForEvent — the
-// firmware path through Stall would block longer than our tick budget
-// on EDK2's stable202408 SimpleTextInputEx).
+// in 100 ms ticks via `busyWait` (a spin-loop, NOT `time.Sleep` —
+// `time.Sleep` blocks past its deadline under TamaGo+UEFI because
+// haveSysmon=false on every arch; see uefiboard/doc.go "Things that
+// BLOCK or MISBEHAVE under TamaGo+UEFI" and R-M9.2a in
+// docs/tamago-uefi-phase2-oci-loader.md).
 
 //go:build tamago && (amd64 || arm64 || loong64 || riscv64)
 
@@ -26,7 +28,8 @@ import "unsafe"
 //   - *EFIError for any other non-success status.
 //
 // Does NOT block. The M9.2 menu loop is responsible for the inter-poll
-// time.Sleep that throttles the busy-loop to ~10 polls/second.
+// `busyWait` that throttles the busy-loop to ~10 polls/second. (Why
+// not `time.Sleep`: see the package-level note in uefiboard/doc.go.)
 func ReadKeyNonblocking() (Keystroke, error) {
 	if systemTable == 0 {
 		return Keystroke{}, ErrNoBootServices

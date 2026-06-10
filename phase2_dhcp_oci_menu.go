@@ -715,12 +715,33 @@ var (
 
 // busyWait spin-waits for `d` using runtime.Nanotime-style probing
 // via time.Now. The menu loop uses this instead of time.Sleep because
-// time.Sleep in the M9.2 single-goroutine probe environment relies on
-// the scheduler's timer thread which, when no concurrent goroutines
-// are alive to drive it, can block past the requested deadline.
-// busyWait is single-threaded and predictable — same pattern as the
-// "drive RX inline" workaround documented in
+// time.Sleep BLOCKS PAST ITS DEADLINE in the M9.2 single-goroutine
+// probe environment: the Go timer wheel needs an off-G driver
+// (sysmon or netpoll) to advance, and TamaGo declares
+// `haveSysmon = false` (runtime/proc.go) on every supported arch
+// (amd64, arm64, riscv64, loong64). Without sysmon, a `time.Sleep`
+// call parks the only running G on a timer that nothing wakes up.
+// R-amd64g's async preemption (SIGURG-driven preemption of a
+// long-running G) helps with cooperative-scheduling fairness but
+// does NOT bring sysmon back, so amd64 has the SAME failure mode as
+// the other arches and must use the same workaround.
+//
+// busyWait is single-threaded and predictable — same pattern shape
+// as the "drive RX inline" workaround in ministack (commits 91364cf,
+// 8c86f35) and the synchronous gunzip+tar refactor in
 // phase2_oci_kernel_boot.go (R-M8.3b).
+//
+// Why this is acceptable here: the 100 ms tick burns at most 10% of
+// one core averaged over the menu's lifetime (cfg.Timeout seconds,
+// typically 10 s), the kernel-side scheduler is not yet running so we
+// are not stealing cycles from anyone, and the firmware's ConIn poll
+// happens once per tick so the user perceives ~100 ms keypress
+// latency — well below the visual cursor-update threshold.
+//
+// Future-contributor warning: see uefiboard/doc.go "Things that BLOCK
+// or MISBEHAVE under TamaGo+UEFI" before reaching for time.Sleep,
+// io.Pipe, or any chan + time.After-based synchronisation in a
+// single-G probe path.
 func busyWait(d time.Duration) {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
