@@ -151,27 +151,29 @@ fs0:
 EOF
 mcopy -i "$ESP" "$NSH_PATH" "::/startup.nsh"
 
-# M8.14 (R-amd64j) — stage the embedded initramfs as `\initrd.gz` on
-# the ESP so the kernel EFI-stub's cmdline-driven `initrd=\initrd.gz`
-# loader (drivers/firmware/efi/libstub/file.c handle_cmdline_files →
-# efi_open_volume) can read it. amd64 only — the other three arches
-# publish the initrd via LINUX_EFI_INITRD_MEDIA_GUID + LoadFile2 from
-# the in-memory embedded bytes (proven in M8.10/M8.11/M8.12).
+# M8.15 (2026-06-11) — stage the per-arch initramfs as `\initrd.gz` on
+# the ESP for ALL FOUR arches so the kernel EFI-stub's cmdline-driven
+# `initrd=\initrd.gz` loader (drivers/firmware/efi/libstub/file.c
+# handle_cmdline_files → efi_open_volume) can read it. Unifies the
+# initrd path across amd64/arm64/riscv64/loong64.
 #
-# Why amd64 needs the ESP-file workaround: EDK2 OVMF amd64's LoadFile2
-# implementation has a buffer-swap quirk — the address it passes our
-# callback is not the buffer the kernel later reads from. Phase 3
-# (cloud-boot/docs@14484d3) ruled out caller-side bugs; the ESP-file
-# path bypasses LoadFile2 entirely.
-if [[ "$ARCH" == "amd64" ]]; then
-    INITRAMFS_SRC="$REPO_DIR/internal/embed_initramfs/initramfs_amd64.cpio.gz"
-    if [[ ! -f "$INITRAMFS_SRC" ]]; then
-        echo "[live-kernelboot:$ARCH] missing $INITRAMFS_SRC — required for R-amd64j ESP-file initrd" >&2
-        exit 1
-    fi
-    mcopy -i "$ESP" "$INITRAMFS_SRC" "::/initrd.gz"
-    echo "[live-kernelboot:$ARCH] staged initrd.gz on ESP ($(stat -f%z "$INITRAMFS_SRC" 2>/dev/null || stat -c%s "$INITRAMFS_SRC") bytes)" >&2
+# Historical context:
+#   - M8.14 (R-amd64j, 2026-06-10) introduced the ESP-file path for
+#     amd64 only because EDK2 OVMF amd64's LoadFile2 has a buffer-swap
+#     quirk. arm64/riscv64/loong64 kept the LoadFile2 protocol path
+#     (proven in M8.10/M8.11/M8.12).
+#   - M8.15 unifies onto the ESP-file path because efi_open_volume is
+#     arch-agnostic in the kernel and DXE Core + FatDxe + per-arch virt
+#     firmware all surface SimpleFileSystem on the parent DeviceHandle
+#     identically. See cloud-boot/docs/tamago-uefi-phase2-oci-loader.md
+#     §M8.15 for the unification rationale + the per-arch outcome.
+INITRAMFS_SRC="$REPO_DIR/internal/embed_initramfs/initramfs_${ARCH}.cpio.gz"
+if [[ ! -f "$INITRAMFS_SRC" ]]; then
+    echo "[live-kernelboot:$ARCH] missing $INITRAMFS_SRC — required for M8.15 ESP-file initrd unification" >&2
+    exit 1
 fi
+mcopy -i "$ESP" "$INITRAMFS_SRC" "::/initrd.gz"
+echo "[live-kernelboot:$ARCH] staged initrd.gz on ESP ($(stat -f%z "$INITRAMFS_SRC" 2>/dev/null || stat -c%s "$INITRAMFS_SRC") bytes)" >&2
 
 case "$ARCH" in
     arm64)
@@ -319,18 +321,15 @@ case "$ARCH" in
         # PublishInitrd installs the embedded minimal initramfs
         # under LINUX_EFI_INITRD_MEDIA_GUID. Both must fire.
         grep -q "phase2-oci-kernel-boot: DTB probe:" "$LOG" || PASS=0
-        # M8.14 (R-amd64j): amd64 uses the ESP-file initrd path
-        # (kernelBootInitrdMode = "espfile") instead of PublishInitrd
-        # because EDK2 OVMF amd64's LoadFile2 has a buffer-swap quirk
-        # (Phase 3 / cloud-boot/docs@14484d3). The kernel EFI-stub
-        # loads initrd.gz from the ESP via cmdline `initrd=\initrd.gz`
-        # after we inherit the parent DeviceHandle into its LoadedImage.
-        if [[ "$ARCH" == "amd64" ]]; then
-            grep -q "phase2-oci-kernel-boot: InheritParentDeviceHandle OK" "$LOG" || PASS=0
-            grep -q "phase2-oci-kernel-boot: initrd source = ESP file" "$LOG" || PASS=0
-        else
-            grep -q "phase2-oci-kernel-boot: PublishInitrd OK" "$LOG" || PASS=0
-        fi
+        # M8.15 (2026-06-11): all 4 arches unified onto the ESP-file
+        # initrd path (kernelBootInitrdMode = "espfile"). The kernel
+        # EFI-stub loads initrd.gz from the ESP via cmdline
+        # `initrd=\initrd.gz` after we inherit the parent DeviceHandle
+        # into its LoadedImage. Replaces the M8.14 amd64-only branch
+        # + the M8.10/M8.11/M8.12 arm64/riscv64/loong64 PublishInitrd
+        # path.
+        grep -q "phase2-oci-kernel-boot: InheritParentDeviceHandle OK" "$LOG" || PASS=0
+        grep -q "phase2-oci-kernel-boot: initrd source = ESP file" "$LOG" || PASS=0
         # M8.4 self-publish (2026-06-10): require post-StartImage
         # kernel-side proof. The Linux EFI-stub prints either
         # "EFI stub: Booting Linux Kernel..." (arm64/rv64) or jumps

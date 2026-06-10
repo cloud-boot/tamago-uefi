@@ -779,26 +779,29 @@ func runKernelBootLinuxKernel() {
 	}
 	println("phase2-oci-kernel-boot: SetLoadOptions OK; cmdline len =", len(kernelBootCmdline))
 
-	// M8.14 (R-amd64j) — on "espfile" arches (amd64) we copy our
-	// parent LoadedImage.DeviceHandle + FilePath into the kernel's
-	// LoadedImage so the EFI-stub's cmdline-driven `initrd=<path>`
-	// loader (drivers/firmware/efi/libstub/file.c handle_cmdline_files
-	// → efi_open_volume) can read the initrd from the ESP we already
-	// booted from. Without this, the firmware leaves the kernel's
-	// DeviceHandle NULL (LoadImage was called with SourceBuffer +
-	// no FilePath — MdeModulePkg/Core/Dxe/Image/Image.c CoreLoadImage)
-	// and `efi_open_volume(image)` fails closed.
+	// M8.15 (2026-06-11) — all 4 arches now use the cmdline-driven
+	// `initrd=<path>` loader, so we copy our parent
+	// LoadedImage.DeviceHandle + FilePath into the kernel's
+	// LoadedImage unconditionally. The Linux EFI-stub's
+	// efi_load_initrd_cmdline → handle_cmdline_files → efi_open_volume
+	// (drivers/firmware/efi/libstub/file.c) reads `initrd=\initrd.gz`
+	// from the ESP we already booted from. Without this, the firmware
+	// leaves the kernel's DeviceHandle NULL (LoadImage was called with
+	// SourceBuffer + no FilePath — MdeModulePkg/Core/Dxe/Image/Image.c
+	// CoreLoadImage) and `efi_open_volume(image)` fails closed.
 	//
-	// "protocol" arches (arm64/riscv64/loong64) skip this — they
-	// publish LINUX_EFI_INITRD_MEDIA_GUID + LoadFile2 below instead.
-	if kernelBootInitrdMode == "espfile" {
-		if ierr := uefiboard.InheritParentDeviceHandle(handle); ierr != nil {
-			println("phase2-oci-kernel-boot: InheritParentDeviceHandle FAILED:", ierr.Error())
-			println("phase2-oci-kernel-boot: KERNEL-BOOT FAIL:", ierr.Error())
-			return
-		}
-		println("phase2-oci-kernel-boot: InheritParentDeviceHandle OK (espfile mode; kernel inherits parent ESP DeviceHandle)")
+	// Pre-M8.15: amd64 ("espfile") took this branch; arm64/riscv64/loong64
+	// ("protocol") published LINUX_EFI_INITRD_MEDIA_GUID + LoadFile2
+	// instead. M8.15 verified empirically that all 4 arches succeed
+	// via the cmdline path — EDK2's DXE Core + FatDxe surface
+	// SimpleFileSystem on the parent ESP DeviceHandle identically
+	// across ArmVirtPkg/RiscVVirtPkg/LoongArchVirtPkg/OvmfPkg.
+	if ierr := uefiboard.InheritParentDeviceHandle(handle); ierr != nil {
+		println("phase2-oci-kernel-boot: InheritParentDeviceHandle FAILED:", ierr.Error())
+		println("phase2-oci-kernel-boot: KERNEL-BOOT FAIL:", ierr.Error())
+		return
 	}
+	println("phase2-oci-kernel-boot: InheritParentDeviceHandle OK (espfile mode; kernel inherits parent ESP DeviceHandle)")
 
 	// DTB probe (M8.4). Linux's EFI-stub auto-locates the
 	// flattened device tree by scanning gST->ConfigurationTable for

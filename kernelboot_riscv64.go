@@ -94,12 +94,13 @@ package main
 var (
 	kernelBootTargetRef = "https://ttl.sh/cloudboot-vmlinuz-riscv64:24h"
 	kernelBootCmdline   = "console=hvc0 earlycon=sbi " +
-		"root=/dev/ram0 rdinit=/init " +
+		"root=/dev/ram0 rdinit=/init initrd=\\initrd.gz " +
 		"loglevel=8 panic=10"
 	kernelBootInitrdRef         = ""
 	kernelBootUseEmbeddedInitrd = true
-	// kernelBootInitrdMode = "protocol" — riscv64 EDK2 publishes
-	// LoadFile2 cleanly; PublishInitrd path works as proven in M8.11.
-	// See kernelboot_amd64.go for the "espfile" alternative.
-	kernelBootInitrdMode = "protocol"
+	// kernelBootInitrdMode (M8.15, 2026-06-11): unified onto the
+	// "espfile" path. See kernelboot_arm64.go M8.15 block for the
+	// unification rationale. Historical: M8.11 proved the "protocol"
+	// LoadFile2 path on riscv64.
+	kernelBootInitrdMode = "espfile"
 )

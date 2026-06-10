@@ -87,12 +87,19 @@ var (
 	kernelBootCmdline   = "console=ttyAMA0,115200 " +
 		"earlycon=pl011,mmio32,0x9000000 keep_bootcon earlyprintk=keep " +
 		"printk.time=y " +
-		"root=/dev/ram0 rdinit=/init " +
+		"root=/dev/ram0 rdinit=/init initrd=\\initrd.gz " +
 		"loglevel=8 panic=10"
 	kernelBootInitrdRef         = ""
 	kernelBootUseEmbeddedInitrd = true
-	// kernelBootInitrdMode = "protocol" — arm64 EDK2 publishes
-	// LoadFile2 cleanly; PublishInitrd path works as proven in M8.10.
-	// See kernelboot_amd64.go for the "espfile" alternative.
-	kernelBootInitrdMode = "protocol"
+	// kernelBootInitrdMode (M8.15, 2026-06-11): unified onto the
+	// "espfile" path used by amd64 since M8.14. The Linux EFI-stub's
+	// efi_load_initrd_cmdline → handle_cmdline_files → efi_open_volume
+	// path is generic across all 4 arches (DXE Core + FatDxe + the
+	// ArmVirtPkg/RiscVVirtPkg/LoongArchVirtPkg/OvmfPkg ESP DeviceHandle
+	// share the same SimpleFileSystem publish shape). InheritParentDeviceHandle
+	// (uefiboard/inherit_device_handle.go, build tag `tamago && (amd64
+	// || arm64 || loong64 || riscv64)`) was already arch-neutral.
+	// Historical: M8.10 proved the "protocol" LoadFile2 path on arm64;
+	// kept as fallback in trace files for diagnostic-only future use.
+	kernelBootInitrdMode = "espfile"
 )

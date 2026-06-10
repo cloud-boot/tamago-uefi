@@ -84,12 +84,13 @@ package main
 var (
 	kernelBootTargetRef = "https://ttl.sh/cloudboot-vmlinuz-loong64:24h"
 	kernelBootCmdline   = "console=ttyS0,115200 " +
-		"root=/dev/ram0 rdinit=/init " +
+		"root=/dev/ram0 rdinit=/init initrd=\\initrd.gz " +
 		"loglevel=8 panic=10"
 	kernelBootInitrdRef         = ""
 	kernelBootUseEmbeddedInitrd = true
-	// kernelBootInitrdMode = "protocol" — loong64 EDK2 publishes
-	// LoadFile2 cleanly; PublishInitrd path works as proven in M8.12.
-	// See kernelboot_amd64.go for the "espfile" alternative.
-	kernelBootInitrdMode = "protocol"
+	// kernelBootInitrdMode (M8.15, 2026-06-11): unified onto the
+	// "espfile" path. See kernelboot_arm64.go M8.15 block for the
+	// unification rationale. Historical: M8.12 proved the "protocol"
+	// LoadFile2 path on loong64.
+	kernelBootInitrdMode = "espfile"
 )
