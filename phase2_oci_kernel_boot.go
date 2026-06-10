@@ -90,75 +90,46 @@ import (
 	"github.com/cloud-boot/tamago-uefi/uefiboard/ministack/oci"
 )
 
-// kernelBootTargetRef is the OCI artifact the MODE A / MODE C path
-// fetches. Empty = MODE B (self-test against an in-process Transport).
+// kernelBootTargetRef / kernelBootCmdline / kernelBootInitrdRef /
+// kernelBootUseEmbeddedInitrd are now defined per-arch in
+// kernelboot_<arch>.go (M8.3 per-arch split, 2026-06-10).
 //
-// M8.3 wiring (2026-06-09): populated with the public siderolabs
-// EFI-stub kernel artifact on ghcr.io. Anonymous bearer-token pull;
-// multi-arch index resolves to per-arch manifests. The first (only)
-// layer is a tar.gz containing `boot/vmlinuz` as the EFI-stub kernel
-// (PE32+ with MZ + 'ARMd' magic at offset 0x38 on arm64 — verified
-// against the artifact pulled 2026-06-09).
+// Each per-arch file sets the OCI ref + cmdline appropriate for its
+// architecture. Arches without a validated public EFI-stub kernel OCI
+// artifact (riscv64, loong64, amd64) ship the framework with empty
+// constants so the runtime path collapses to MODE B (self-test)
+// while keeping the wiring identical.
 //
-// Per-arch handling: the init() at the bottom of this file resets the
-// ref back to "" on every arch where we haven't validated the layer
-// shape, so MODE C only activates on arches where we know vmlinuz
-// extraction will succeed.
+// Documentation:
 //
-// Reference: cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.3.
-var kernelBootTargetRef = "https://ghcr.io/siderolabs/kernel:v0.6.0-alpha.0-1-ge8ed5bc"
-
-// kernelBootCmdline is the Linux kernel command line installed via
-// uefiboard.SetLoadOptions before StartImage. Empty = no cmdline
-// install; non-empty + non-empty kernelBootTargetRef = MODE C.
+//   - kernelBootTargetRef: OCI artifact for MODE A / MODE C. Empty =
+//     MODE B (self-test against in-process Transport). The siderolabs
+//     EFI-stub kernel artifact on ghcr.io is the validated arm64 ref;
+//     anonymous bearer-token pull; multi-arch index resolves to
+//     per-arch manifests; first layer is a tar.gz containing
+//     boot/vmlinuz (PE32+ with MZ + 'ARMd' magic at offset 0x38 on
+//     arm64).
 //
-// Typical values:
+//   - kernelBootCmdline: Linux kernel command line installed via
+//     uefiboard.SetLoadOptions before StartImage. Empty = MODE A
+//     (no cmdline). Typical values:
+//       "console=ttyAMA0,115200 earlyprintk=ttyAMA0,115200"  (arm64 virt)
+//       "console=ttyS0,115200 earlyprintk=ttyS0,115200"      (amd64 OVMF)
+//       "console=hvc0 earlycon=sbi"                          (riscv64 virt)
+//       "console=ttyS0,115200"                               (loong64 virt)
+//     The Linux EFI-stub reads it from LoadedImageProtocol.LoadOptions
+//     (UEFI 2.10 §9.2 / Documentation/admin-guide/efi-stub.rst).
 //
-//	"console=ttyAMA0,115200 earlyprintk=ttyAMA0,115200"  (arm64 virt)
-//	"console=ttyS0,115200 earlyprintk=ttyS0,115200"      (amd64 OVMF)
-//	"console=hvc0 earlycon=sbi"                          (riscv64 virt)
+//   - kernelBootInitrdRef: OCI ref to stream as the initrd. Empty =
+//     fall back to embedded fallback or skip publication entirely.
+//     M8.4 status: empty on all arches (no publicly-pullable
+//     standalone initramfs OCI ref discovered).
 //
-// The Linux EFI-stub reads it from LoadedImageProtocol.LoadOptions
-// of its own image handle (UEFI 2.10 §9.2 / Documentation/admin-
-// guide/efi-stub.rst).
+//   - kernelBootUseEmbeddedInitrd: when true and kernelBootInitrdRef
+//     is empty, publishes the embedded 260-byte cpio.gz from
+//     internal/embed_initramfs as the initrd.
 //
-// M8.3 default below is the arm64 virt cmdline; init() rewrites it
-// per-arch.
-var kernelBootCmdline = "console=ttyAMA0,115200 earlyprintk=ttyAMA0,115200"
-
-// kernelBootInitrdRef is the OCI ref the MODE C path streams to
-// obtain the initrd. Empty = fall back to the embedded minimal
-// initramfs (see kernelBootUseEmbeddedInitrd below) or — when that
-// flag is also false — skip initrd publication entirely and let the
-// EFI-stub kernel boot cmdline-only (almost always panics on a
-// distro kernel).
-//
-// When set, the MODE C flow streams the configured OCI layer via
-// oci.FetchBlobStream, gzip-detects + decompresses if needed, then
-// publishes an EFI_LOAD_FILE2_PROTOCOL under
-// LINUX_EFI_INITRD_MEDIA_GUID via uefiboard.PublishInitrd before
-// StartImage and unpublishes after.
-//
-// M8.4 status: stays empty in this build because we did not find a
-// publicly-pullable initramfs that pairs with the siderolabs/kernel
-// EFI-stub kernel (siderolabs publishes only the multi-layer
-// `installer` aggregate, no anonymous standalone initramfs OCI
-// ref). The path itself is still exercised end-to-end via the
-// embedded fallback below.
-var kernelBootInitrdRef = ""
-
-// kernelBootUseEmbeddedInitrd, when true and kernelBootInitrdRef is
-// empty, causes MODE C to publish the tiny embedded cpio.gz from
-// internal/embed_initramfs as the initrd. This is the M8.4 PASS
-// path: a 260-byte cpio with a single /init script that prints a
-// marker and exits — the kernel will unpack the initramfs (visible
-// in dmesg as "Unpacking initramfs..."), exec /init, and either
-// run the marker or panic on "Attempted to kill init!". Either way
-// the DTB + initrd protocol handoff is proven.
-//
-// Demoting to false skips PublishInitrd entirely, reproducing the
-// pre-M8.4 cmdline-only boot.
-var kernelBootUseEmbeddedInitrd = true
+// Reference: cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.3/§M8.4.
 
 // kernelBootSelfTestRef is the synthetic ref the MODE B path uses to
 // stand up its in-process Registry. The host string is intentionally
@@ -538,26 +509,6 @@ func hexUintptrKernelBoot(v uintptr) string {
 	return string(buf[i:])
 }
 
-// init resets kernelBootTargetRef and kernelBootCmdline on arches
-// where the M8.3 wiring has NOT been validated. The siderolabs OCI
-// layer is a multi-arch index resolving to per-arch manifests; each
-// manifest's first layer is a tar.gz of a rootfs containing
-// boot/vmlinuz. We have only verified the arm64 path end-to-end
-// (PE32+ MZ + 'ARMd' magic + machine type 0xaa64). Until we re-verify
-// per arch (amd64 blocked behind #1's OVMF sprint; riscv64 / loong64
-// would need their own ref + cmdline), MODE C only fires on arm64.
-//
-// Demoting to MODE B (synthetic self-test) on other arches keeps the
-// per-arch live runners green while M8.3 remains arm64-only.
-func init() {
-	if runtime.GOARCH != "arm64" {
-		kernelBootTargetRef = ""
-		kernelBootCmdline = ""
-		kernelBootInitrdRef = ""
-		kernelBootUseEmbeddedInitrd = false
-	}
-}
-
 // kernelBootMaxLayerSize caps the streamed first-layer size at 64 MiB
 // to prevent a misconfigured ref from exhausting memory. The
 // siderolabs arm64 layer used by M8.3 is ~22 MiB compressed; vmlinuz
@@ -776,6 +727,15 @@ func runKernelBootLinuxKernel() {
 	//      M8.4 default, ~260 bytes, no network roundtrip.
 	//   3. None — pre-M8.4 cmdline-only behaviour (panics on most
 	//      kernels for lack of rootfs).
+	//
+	// R-M8.4a debug instrumentation (2026-06-10): enable the
+	// nosplit ConOut trace inside loadFileGo BEFORE PublishInitrd
+	// so any callback the EFI-stub makes paints a diagnostic line
+	// on the serial console. Cheap (a few hundred bytes per call)
+	// and safe to leave on for the M8.4 debug window — the trace
+	// goes through the same printk → ConOut → firmware-out path
+	// the kernel EFI-stub itself uses.
+	uefiboard.LoadFileTraceEnabled = true
 	var initrdHandle uintptr
 	switch {
 	case kernelBootInitrdRef != "":
