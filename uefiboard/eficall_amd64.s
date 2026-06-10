@@ -17,21 +17,6 @@
 // Callees that take fewer than 6 args ignore the trailing slots. The
 // Phase-1 / M0 / M1 / M1.5 / M1.6 call sites pass 0 for the unused
 // trailing positions.
-//
-// R-amd64b (2026-06-09): dropped the pre-CALL `SP = RamStart + RamSize`
-// stack switch. The original switch existed to give firmware "a large,
-// valid stack" — but it derived the new SP from the same broken
-// `RamStart + 704 MiB` calculation cpuinit used (text + 704 MiB, which
-// overflowed past the QEMU q35 `0x80000000` PCI MMIO hole when OVMF
-// loaded multi-MiB images near the top of free RAM), and on top of
-// that, switching to the TOP of our allocated heap mid-runtime would
-// stomp on memory the goroutine has already passed through (g0 stack
-// lives in the SAME region after R-amd64b's cpuinit rewrite). The
-// arm64 / riscv64 / loong64 thunks have never done this and Boot
-// Services calls (ConOut->OutputString, AllocatePages, LoadImage,
-// StartImage, exit) fit comfortably in a Go goroutine stack. Same
-// shape adopted here. See cloud-boot/docs/m6-2-edk2-upstream-investigation.md
-// § 11.
 
 #include "textflag.h"
 
@@ -45,12 +30,24 @@ TEXT ·efiCall(SB),NOSPLIT,$0-64
 	MOVQ	a4+40(FP), R11	// 5th arg, lands at [RSP+0x20] below
 	MOVQ	a5+48(FP), R12	// 6th arg, lands at [RSP+0x28] below
 
-	// Stay on the Go goroutine stack (mirrors arm64 / riscv64 /
-	// loong64 thunks). Just reserve the MS x64 frame: 32-byte shadow
-	// space + slots for the 5th/6th args, padded so SP stays 16-byte
-	// aligned after the CALL's 8-byte return-address push. 48 = 32
-	// (shadow) + 16 (slot4 + slot5) gives the right alignment under
-	// Go's "SP is 8-mod-16 inside any function frame" convention.
+	// RBX is non-volatile under both System V and MS x64, so it safely
+	// carries the Go stack pointer across the firmware call.
+	MOVQ	SP, BX
+
+	// Firmware wants a large, valid stack; switch to the top of RAM.
+	MOVQ	runtime∕goos·RamStart(SB), SP
+	MOVQ	runtime∕goos·RamSize(SB), R10
+	ADDQ	R10, SP
+	ANDQ	$~15, SP		// 16-byte alignment
+
+	// MS x64 frame layout for a 6-arg call:
+	//   [RSP+0x00..0x1F]  32-byte shadow space (caller-owned, callee
+	//                     may scratch — required even though we passed
+	//                     args in registers).
+	//   [RSP+0x20]        5th arg.
+	//   [RSP+0x28]        6th arg.
+	// We reserve 0x30 = 48 bytes to keep RSP 16-byte aligned *after*
+	// the CALL pushes its 8-byte return address (32 + 16 + 8 padding).
 	SUBQ	$48, SP
 	MOVQ	R11, 32(SP)		// 5th arg at [RSP+0x20]
 	MOVQ	R12, 40(SP)		// 6th arg at [RSP+0x28]
@@ -63,7 +60,8 @@ TEXT ·efiCall(SB),NOSPLIT,$0-64
 	// firmware may have re-enabled interrupts
 	CLI
 
-	// publish the EFI_STATUS (FP is valid again now that SP is back
-	// to its entry value)
+	// restore Go stack, then publish the status (FP is valid again now that
+	// SP is back to its entry value)
+	MOVQ	BX, SP
 	MOVQ	AX, status+56(FP)
 	RET
