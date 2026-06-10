@@ -7,6 +7,16 @@
 //
 // Mirrors the contract of TamaGo's goos trampoline (runtime/goos.CPUInit
 // → JMP cpuinit) and ends by entering the standard amd64 TamaGo rt0.
+//
+// R-amd64f #2 (2026-06-10): RamStart is anchored at the page-aligned start
+// of `·heapReserve(SB)` — a 128 MiB .bss reservation in board_amd64.go that
+// the firmware's own LoadImage AllocatePages already covered (the linker
+// rolls it into the PE32+ SizeOfImage). We do NOT call any Boot Service
+// from cpuinit: every Boot Service dispatch from cpuinit on patched OVMF
+// amd64 crashes (R-amd64e H5/H6 confirmed it's not AllocatePages-specific;
+// see docs/m6-2-edk2-upstream-investigation.md § 15 + § 16). The reserve
+// IS firmware-allocated, RW, mapped, ours — we just need to compute its
+// page-aligned base and point the runtime at it.
 
 #include "textflag.h"
 
@@ -27,15 +37,20 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	// already in long mode with paging, so we do NOT touch page tables.
 	CALL	sse_enable(SB)
 
-	// RamStart = &runtime.text - 64 KiB. Deriving it from the actual loaded
-	// text address (rather than the link base) keeps us tolerant to wherever
-	// the firmware placed the image.
-	MOVQ	$runtime·text(SB), AX
-	SUBQ	$(64*1024), AX
+	// RamStart = page_align_up(&heapReserve[0]). heapReserve is the
+	// 128 MiB .bss reservation in board_amd64.go (firmware-allocated as
+	// part of our PE32+ SizeOfImage); rounding up to the next 4 KiB
+	// boundary guarantees clean page math even though Go's linker does
+	// not promise page-aligned BSS symbol placement.
+	MOVQ	$·heapReserve(SB), AX
+	ADDQ	$0xFFF, AX
+	ANDQ	$~0xFFF, AX
 	MOVQ	AX, runtime∕goos·RamStart(SB)
 
-	// stack pointer = RamStart + RamSize - RamStackOffset (top of RAM minus
-	// the reserved stack window)
+	// stack pointer = RamStart + RamSize - RamStackOffset (top of RAM
+	// minus the reserved stack window). RamSize == heapReserveSize
+	// (128 MiB) — set in board_amd64.go; the trailing +4096 slack on
+	// heapReserve absorbs the round-up so we never run past the array.
 	MOVQ	runtime∕goos·RamStart(SB), SP
 	MOVQ	runtime∕goos·RamSize(SB), AX
 	MOVQ	runtime∕goos·RamStackOffset(SB), BX
