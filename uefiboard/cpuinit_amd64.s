@@ -47,6 +47,18 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	ANDQ	$~0xFFF, AX
 	MOVQ	AX, runtime∕goos·RamStart(SB)
 
+	// Bloc = RamStart. The runtime's osinit() reads goos.Bloc; if
+	// non-zero it primes bloc/blocMax with it, otherwise it falls back
+	// to initBloc() which sets bloc = firstmoduledata.end (i.e. the end
+	// of our .bss — which lies PAST the 128 MiB heapReserve, hence past
+	// our SP). Without this write the first sbrk() pass would find
+	// bloc > g0.stack.lo and return nil → "runtime: cannot allocate
+	// memory" (the R-amd64g failure mode). arm64 / riscv64 / loong64
+	// cpuinits do the same after their AllocatePages call; the .bss
+	// strategy here is no different — Bloc still must be anchored at
+	// the start of the usable heap window.
+	MOVQ	AX, runtime∕goos·Bloc(SB)
+
 	// stack pointer = RamStart + RamSize - RamStackOffset (top of RAM
 	// minus the reserved stack window). RamSize == heapReserveSize
 	// (128 MiB) — set in board_amd64.go; the trailing +4096 slack on
