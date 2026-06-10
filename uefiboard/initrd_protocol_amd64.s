@@ -18,13 +18,15 @@
 //                         return address, so caller's 5th arg is
 //                         at [RSP+0x28] = ret-addr(8) + shadow(32))
 //   ret in RAX
-//   callee-saved integer regs: RBX, RBP, RDI, RSI, R12, R13, R14,
-//                              R15. (RSP of course preserved.)
-//   callee-saved XMM regs: XMM6..XMM15 (the firmware promises 16-byte
-//   alignment but we use the upper-half XMM very sparingly in Go
-//   code; we save the four most-likely-clobbered, XMM6..XMM9, and
-//   leave the rest — Go's compiler does not emit floating-point on
-//   our nosplit handler).
+//   callee-saved integer regs: RBX, RBP, RDI, RSI, R12, R13, R14, R15
+//   callee-saved XMM regs:     XMM6..XMM15
+//
+// R-fbsd1a (sprint 1.2, 2026-06-11): the block-IO sibling trampoline
+// only saved integer callee-saved regs; firmware code clobbered
+// XMM6..XMM15 on return → delayed firmware-side #PF with CR2 in the
+// sign-extended uint32 pattern that fingerprints XMM corruption. We
+// now save the full MS x64 callee-saved XMM set here too, even though
+// the LoadFile2 path historically didn't trigger it — defensive.
 //
 // R-amd64j Phase 3 (2026-06-10) — INCONCLUSIVE under the time cap.
 // Phase-3 four-candidate COM1 dump (BP=168(SP), S8=R8, A=160(SP),
@@ -42,10 +44,10 @@
 // reclaim during ExitBootServices on amd64 OVMF stomping the
 // LoadFile2-target buffer before the kernel proper reads it).
 // See docs/m8-r-amd64j-phase3-findings.md for the full dump
-// + theory walkthrough. Reverting to 168 (per spec) until the
-// Phase-4 root cause is identified.
+// + theory walkthrough. Reverting to spec offset (now SP+344 after
+// the SUB grew 128→304 for the XMM saves) until Phase-4 closes.
 //
-// Frame layout (top-down, post-SUB):
+// Frame layout (top-down, post-SUB $304):
 //   SP+0    arg this
 //   SP+8    arg filePath
 //   SP+16   arg bp
@@ -60,10 +62,22 @@
 //   SP+88   saved R13
 //   SP+96   saved R14
 //   SP+104  saved R15
-//   SP+112  padding (16-byte alignment)
-// Total: 120 bytes (multiple of 8; the CALL pushes 8 more so the
-// post-CALL frame is 16-byte aligned as Go expects for SSE).
-// We round up to 128 to keep RSP 16-aligned at THIS frame too.
+//   SP+112  saved XMM6  (16 B)
+//   SP+128  saved XMM7
+//   SP+144  saved XMM8
+//   SP+160  saved XMM9
+//   SP+176  saved XMM10
+//   SP+192  saved XMM11
+//   SP+208  saved XMM12
+//   SP+224  saved XMM13
+//   SP+240  saved XMM14
+//   SP+256  saved XMM15
+//   SP+272  padding (16 B)
+//   SP+288  padding (16 B)
+//   SP+304  (top of frame)
+//
+// 5th-arg stack offset: previously SP+168 with SUB 128; SUB delta is
+// 304-128=176, so the new offset is 168+176 = 344.
 //
 // Why no +8 reservation here (unlike the arm64 / riscv64 /
 // loong64 sibling files): on amd64 the CALL instruction itself
@@ -82,7 +96,7 @@
 
 // func loadFile_trampoline()
 TEXT ·loadFile_trampoline(SB),NOSPLIT|NOFRAME,$0
-	SUBQ	$128, SP
+	SUBQ	$304, SP
 
 	// Save MS x64 callee-saved integer regs we may touch.
 	MOVQ	BX, 48(SP)
@@ -94,12 +108,24 @@ TEXT ·loadFile_trampoline(SB),NOSPLIT|NOFRAME,$0
 	MOVQ	R14, 96(SP)
 	MOVQ	R15, 104(SP)
 
+	// Save MS x64 callee-saved XMM regs (R-fbsd1a fix).
+	MOVUPS	X6,  112(SP)
+	MOVUPS	X7,  128(SP)
+	MOVUPS	X8,  144(SP)
+	MOVUPS	X9,  160(SP)
+	MOVUPS	X10, 176(SP)
+	MOVUPS	X11, 192(SP)
+	MOVUPS	X12, 208(SP)
+	MOVUPS	X13, 224(SP)
+	MOVUPS	X14, 240(SP)
+	MOVUPS	X15, 256(SP)
+
 	// Fetch the 5th MS x64 arg (buffer) from the caller's stack.
 	// Caller's RSP at our entry pointed at the return address; we
-	// then SUB $128, so the firmware-side 5th arg now sits at
-	// [SP + 128 (our frame) + 8 (caller's return addr) + 0x20
-	// (shadow space) ] = SP + 168.
-	MOVQ	168(SP), AX
+	// then SUB $304, so the firmware-side 5th arg now sits at
+	// [SP + 304 (our frame) + 8 (caller's return addr) + 0x20
+	// (shadow space) ] = SP + 344.
+	MOVQ	344(SP), AX
 
 	// Marshal EFI args into Go ABI0 outgoing slots at SP+0..SP+32.
 	// On amd64 the CALL-pushed return address provides the +0 slot
@@ -117,7 +143,19 @@ TEXT ·loadFile_trampoline(SB),NOSPLIT|NOFRAME,$0
 	// Pull return EFI_STATUS into RAX for the firmware caller.
 	MOVQ	40(SP), AX
 
-	// Restore.
+	// Restore XMM (R-fbsd1a fix).
+	MOVUPS	112(SP), X6
+	MOVUPS	128(SP), X7
+	MOVUPS	144(SP), X8
+	MOVUPS	160(SP), X9
+	MOVUPS	176(SP), X10
+	MOVUPS	192(SP), X11
+	MOVUPS	208(SP), X12
+	MOVUPS	224(SP), X13
+	MOVUPS	240(SP), X14
+	MOVUPS	256(SP), X15
+
+	// Restore integer.
 	MOVQ	48(SP), BX
 	MOVQ	56(SP), BP
 	MOVQ	64(SP), DI
@@ -126,5 +164,5 @@ TEXT ·loadFile_trampoline(SB),NOSPLIT|NOFRAME,$0
 	MOVQ	88(SP), R13
 	MOVQ	96(SP), R14
 	MOVQ	104(SP), R15
-	ADDQ	$128, SP
+	ADDQ	$304, SP
 	RET

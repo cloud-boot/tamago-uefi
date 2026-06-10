@@ -10,6 +10,15 @@
 // `<callee>.abi0` wrapper sees its incoming args at
 // `caller_SP_at_CALL + 0..N*8 - 1` — we do NOT reserve a +0 slot.
 //
+// R-fbsd1a (sprint 1.2, 2026-06-11): added MS x64 callee-saved XMM
+// save/restore (XMM6..XMM15) — Go's amd64 codegen can emit XMM ops
+// inside the Go callback even for nominally-integer-only handlers,
+// so returning to firmware with corrupted XMM6..XMM15 risks a
+// delayed firmware-side #PF. SUB grew 128→304 to accommodate the
+// 160 B XMM save area + 16 B alignment padding. Save offsets for the
+// integer regs were also shifted to match the block_io_publish_amd64.s
+// canonical layout (integer at 48-104, XMM at 112-256).
+//
 // MS x64 on entry (firmware -> us):
 //
 //   GetRNG:                              GetInfo:
@@ -19,42 +28,41 @@
 //     R9  = valuePtr                      ret in RAX
 //     ret in RAX
 //
-// Frame layout for GetRNG (4 args, 1 ret):
-//   SP+0    arg this
-//   SP+8    arg alg
-//   SP+16   arg valueLength
-//   SP+24   arg valuePtr
-//   SP+32   ret status
-//   SP+40   saved RBX
-//   SP+48   saved RBP
-//   SP+56   saved RDI
-//   SP+64   saved RSI
-//   SP+72   saved R12
-//   SP+80   saved R13
-//   SP+88   saved R14
-//   SP+96   saved R15
-//   SP+104  padding
-//   SP+112  padding
-//   SP+120  padding (16-byte alignment)
-// Total: 128 bytes.
+// Frame layout (post-SUB $304, multiple of 16):
+//   SP+0..32   args (3 or 4 used, slot 32 ignored for 3-arg)
+//   SP+40      ret status (4-arg shape) — for 3-arg, ret lives at SP+24
+//   SP+48..104 saved RBX, RBP, RDI, RSI, R12..R15
+//   SP+112..256 saved XMM6..XMM15
+//   SP+272..288 padding
 //
-// Frame layout for GetInfo (3 args, 1 ret): mirror of above,
-// args at SP+0..16, result at SP+24.
+// GetRNG (4 args, 1 ret): args at SP+0..24, ret at SP+32.
+// GetInfo (3 args, 1 ret): args at SP+0..16, ret at SP+24.
 
 #include "textflag.h"
 
 // func rngGetRNG_trampoline()
 TEXT ·rngGetRNG_trampoline(SB),NOSPLIT|NOFRAME,$0
-	SUBQ	$128, SP
+	SUBQ	$304, SP
 
-	MOVQ	BX, 40(SP)
-	MOVQ	BP, 48(SP)
-	MOVQ	DI, 56(SP)
-	MOVQ	SI, 64(SP)
-	MOVQ	R12, 72(SP)
-	MOVQ	R13, 80(SP)
-	MOVQ	R14, 88(SP)
-	MOVQ	R15, 96(SP)
+	MOVQ	BX, 48(SP)
+	MOVQ	BP, 56(SP)
+	MOVQ	DI, 64(SP)
+	MOVQ	SI, 72(SP)
+	MOVQ	R12, 80(SP)
+	MOVQ	R13, 88(SP)
+	MOVQ	R14, 96(SP)
+	MOVQ	R15, 104(SP)
+
+	MOVUPS	X6,  112(SP)
+	MOVUPS	X7,  128(SP)
+	MOVUPS	X8,  144(SP)
+	MOVUPS	X9,  160(SP)
+	MOVUPS	X10, 176(SP)
+	MOVUPS	X11, 192(SP)
+	MOVUPS	X12, 208(SP)
+	MOVUPS	X13, 224(SP)
+	MOVUPS	X14, 240(SP)
+	MOVUPS	X15, 256(SP)
 
 	// Marshal EFI args into Go ABI0 outgoing slots at SP+0..SP+24.
 	MOVQ	CX, 0(SP)   // this
@@ -67,29 +75,51 @@ TEXT ·rngGetRNG_trampoline(SB),NOSPLIT|NOFRAME,$0
 	// Pull return EFI_STATUS into RAX for the firmware caller.
 	MOVQ	32(SP), AX
 
-	MOVQ	40(SP), BX
-	MOVQ	48(SP), BP
-	MOVQ	56(SP), DI
-	MOVQ	64(SP), SI
-	MOVQ	72(SP), R12
-	MOVQ	80(SP), R13
-	MOVQ	88(SP), R14
-	MOVQ	96(SP), R15
-	ADDQ	$128, SP
+	MOVUPS	112(SP), X6
+	MOVUPS	128(SP), X7
+	MOVUPS	144(SP), X8
+	MOVUPS	160(SP), X9
+	MOVUPS	176(SP), X10
+	MOVUPS	192(SP), X11
+	MOVUPS	208(SP), X12
+	MOVUPS	224(SP), X13
+	MOVUPS	240(SP), X14
+	MOVUPS	256(SP), X15
+
+	MOVQ	48(SP), BX
+	MOVQ	56(SP), BP
+	MOVQ	64(SP), DI
+	MOVQ	72(SP), SI
+	MOVQ	80(SP), R12
+	MOVQ	88(SP), R13
+	MOVQ	96(SP), R14
+	MOVQ	104(SP), R15
+	ADDQ	$304, SP
 	RET
 
 // func rngGetInfo_trampoline()
 TEXT ·rngGetInfo_trampoline(SB),NOSPLIT|NOFRAME,$0
-	SUBQ	$128, SP
+	SUBQ	$304, SP
 
-	MOVQ	BX, 32(SP)
-	MOVQ	BP, 40(SP)
-	MOVQ	DI, 48(SP)
-	MOVQ	SI, 56(SP)
-	MOVQ	R12, 64(SP)
-	MOVQ	R13, 72(SP)
-	MOVQ	R14, 80(SP)
-	MOVQ	R15, 88(SP)
+	MOVQ	BX, 48(SP)
+	MOVQ	BP, 56(SP)
+	MOVQ	DI, 64(SP)
+	MOVQ	SI, 72(SP)
+	MOVQ	R12, 80(SP)
+	MOVQ	R13, 88(SP)
+	MOVQ	R14, 96(SP)
+	MOVQ	R15, 104(SP)
+
+	MOVUPS	X6,  112(SP)
+	MOVUPS	X7,  128(SP)
+	MOVUPS	X8,  144(SP)
+	MOVUPS	X9,  160(SP)
+	MOVUPS	X10, 176(SP)
+	MOVUPS	X11, 192(SP)
+	MOVUPS	X12, 208(SP)
+	MOVUPS	X13, 224(SP)
+	MOVUPS	X14, 240(SP)
+	MOVUPS	X15, 256(SP)
 
 	// Marshal EFI args into Go ABI0 outgoing slots at SP+0..SP+16.
 	MOVQ	CX, 0(SP)   // this
@@ -101,13 +131,24 @@ TEXT ·rngGetInfo_trampoline(SB),NOSPLIT|NOFRAME,$0
 	// Pull return EFI_STATUS into RAX for the firmware caller.
 	MOVQ	24(SP), AX
 
-	MOVQ	32(SP), BX
-	MOVQ	40(SP), BP
-	MOVQ	48(SP), DI
-	MOVQ	56(SP), SI
-	MOVQ	64(SP), R12
-	MOVQ	72(SP), R13
-	MOVQ	80(SP), R14
-	MOVQ	88(SP), R15
-	ADDQ	$128, SP
+	MOVUPS	112(SP), X6
+	MOVUPS	128(SP), X7
+	MOVUPS	144(SP), X8
+	MOVUPS	160(SP), X9
+	MOVUPS	176(SP), X10
+	MOVUPS	192(SP), X11
+	MOVUPS	208(SP), X12
+	MOVUPS	224(SP), X13
+	MOVUPS	240(SP), X14
+	MOVUPS	256(SP), X15
+
+	MOVQ	48(SP), BX
+	MOVQ	56(SP), BP
+	MOVQ	64(SP), DI
+	MOVQ	72(SP), SI
+	MOVQ	80(SP), R12
+	MOVQ	88(SP), R13
+	MOVQ	96(SP), R14
+	MOVQ	104(SP), R15
+	ADDQ	$304, SP
 	RET

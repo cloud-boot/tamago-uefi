@@ -141,12 +141,23 @@ func blockIO_read_trampoline()
 func blockIO_write_trampoline()
 func blockIO_flush_trampoline()
 
-var (
-	blockIO_reset_trampolineFV = blockIO_reset_trampoline
-	blockIO_read_trampolineFV  = blockIO_read_trampoline
-	blockIO_write_trampolineFV = blockIO_write_trampoline
-	blockIO_flush_trampolineFV = blockIO_flush_trampoline
-)
+// blockIO_*_trampolinePC return the .abi0 entry PC of each trampoline
+// directly (via asm `LEAQ ·sym(SB)`), bypassing the Go ABIInternal
+// wrapper that taking a function-value would otherwise interpose.
+//
+// R-fbsd1a (sprint 1.2): the autogen ABIInternal wrapper on amd64 ends
+// with `XORPS X15,X15` + `MOVQ FS:0(g),R14` — both clobber MS x64
+// callee-saved regs (X15, R14) AFTER our .abi0 epilogue restored them,
+// which the firmware-side PartitionDxe driver-binding probe observes as
+// register corruption → delayed firmware-side #PF
+// (CR2=0xFFFFFFFF98009898 fingerprint pattern). The PC-helper symbols
+// resolve to the .abi0 entry directly so firmware lands in our
+// XMM-saving prologue and returns through our XMM-restoring epilogue,
+// with no wrapper post-process to corrupt state.
+func blockIO_reset_trampolinePC() uintptr
+func blockIO_read_trampolinePC() uintptr
+func blockIO_write_trampolinePC() uintptr
+func blockIO_flush_trampolinePC() uintptr
 
 // PublishBlockIO installs a synthetic EFI_BLOCK_IO_PROTOCOL backed
 // by the given disk-image bytes under a fresh handle. The image MUST
@@ -192,12 +203,15 @@ func PublishBlockIO(image []byte) (uintptr, error) {
 		LastBlock:        uint64(len(body))/uint64(BlockIOLogicalBlockSize) - 1,
 	}
 
-	// Resolve the 4 asm trampoline entry PCs. unsafe.Pointer on a Go
-	// function value yields a *funcval; the first word is the entry PC.
-	resetPC := **(**uintptr)(unsafe.Pointer(&blockIO_reset_trampolineFV))
-	readPC := **(**uintptr)(unsafe.Pointer(&blockIO_read_trampolineFV))
-	writePC := **(**uintptr)(unsafe.Pointer(&blockIO_write_trampolineFV))
-	flushPC := **(**uintptr)(unsafe.Pointer(&blockIO_flush_trampolineFV))
+	// Resolve the 4 asm trampoline entry PCs via the dedicated asm
+	// PC-helpers — these return the .abi0 entry PC directly, bypassing
+	// the Go ABIInternal wrapper (whose XORPS X15 / MOVQ FS:0,R14
+	// trailer would clobber MS x64 callee-saved regs on return to
+	// firmware; see R-fbsd1a sprint-1.2 commentary on the asm side).
+	resetPC := blockIO_reset_trampolinePC()
+	readPC := blockIO_read_trampolinePC()
+	writePC := blockIO_write_trampolinePC()
+	flushPC := blockIO_flush_trampolinePC()
 
 	protocol := &EFIBlockIOProtocolPublished{
 		Revision:    blockIOPublishedRevision,
