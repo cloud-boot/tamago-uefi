@@ -181,6 +181,105 @@ type errCPIOString string
 
 func (e errCPIOString) Error() string { return string(e) }
 
+// TestEmbedInitBannerString verifies the embedded /init ELF
+// contains the Phase 2 Path D banner string. The banner is the
+// load-bearing identification line a live boot grep matches on;
+// if it disappears from the binary we either regressed the Go
+// source or the build chain silently re-bottled an older binary.
+// Walks the cpio newc archive, locates the /init entry, then does
+// a bytes.Contains over its body. We accept any byte position
+// because -ldflags='-s -w' may reorder rodata across Go versions.
+func TestEmbedInitBannerString(t *testing.T) {
+	r, err := gzip.NewReader(bytes.NewReader(RawBytes()))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer r.Close()
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read all: %v", err)
+	}
+
+	body := findCPIOFileBody(t, raw, "init")
+	const want = "cloud-boot/openweft Phase 2 Path D"
+	if !bytes.Contains(body, []byte(want)) {
+		t.Errorf("/init body missing banner substring %q; userspace /init regressed?", want)
+	}
+}
+
+// TestEmbedInitBinarySizeRange asserts the /init ELF inside the
+// cpio.gz is within a sane size envelope. Lower bound rules out
+// the legacy ~260-byte shell-script regression; upper bound (5
+// MiB) catches accidental import bloat (net/http, crypto/tls, …)
+// that would push the embed past the EFI-binary inline budget.
+func TestEmbedInitBinarySizeRange(t *testing.T) {
+	r, err := gzip.NewReader(bytes.NewReader(RawBytes()))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer r.Close()
+	raw, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read all: %v", err)
+	}
+
+	body := findCPIOFileBody(t, raw, "init")
+	const (
+		minBytes = 500 * 1024       // >> any shell-script fixture
+		maxBytes = 5 * 1024 * 1024  // EFI-inline budget guardrail
+	)
+	if len(body) < minBytes || len(body) > maxBytes {
+		t.Errorf("/init body size = %d bytes, want in [%d, %d]",
+			len(body), minBytes, maxBytes)
+	}
+}
+
+// findCPIOFileBody walks the decoded cpio newc stream and returns
+// the file body for the first entry whose name matches `target`
+// (or "./<target>"). Fails the test if the entry is absent. Kept
+// alongside TestEmbedContainsInitELF's walker so both tests share
+// the same parsing rules.
+func findCPIOFileBody(t *testing.T, raw []byte, target string) []byte {
+	t.Helper()
+	const headerLen = 110
+	off := 0
+	for {
+		if off+headerLen > len(raw) {
+			t.Fatalf("walked off end at %d without finding %q", off, target)
+		}
+		hdr := raw[off : off+headerLen]
+		if string(hdr[:6]) != "070701" {
+			t.Fatalf("bad cpio magic at off=%d: %q", off, string(hdr[:6]))
+		}
+		fsize, err := parseCPIOHex8(hdr[54:62])
+		if err != nil {
+			t.Fatalf("parse filesize: %v", err)
+		}
+		nsize, err := parseCPIOHex8(hdr[94:102])
+		if err != nil {
+			t.Fatalf("parse namesize: %v", err)
+		}
+		nameStart := off + headerLen
+		nameEnd := nameStart + int(nsize) - 1
+		if nameEnd > len(raw) || nameStart > nameEnd {
+			t.Fatalf("name range OOB: [%d,%d) of %d", nameStart, nameEnd, len(raw))
+		}
+		name := string(raw[nameStart:nameEnd])
+		bodyStart := align4CPIO(nameStart + int(nsize))
+		bodyEnd := bodyStart + int(fsize)
+		if bodyEnd > len(raw) {
+			t.Fatalf("body OOB: [%d,%d) of %d", bodyStart, bodyEnd, len(raw))
+		}
+		if name == "TRAILER!!!" {
+			t.Fatalf("cpio archive exhausted without %q", target)
+		}
+		if name == target || name == "./"+target {
+			return raw[bodyStart:bodyEnd]
+		}
+		off = align4CPIO(bodyEnd)
+	}
+}
+
 func TestBytesIsDefensiveCopy(t *testing.T) {
 	a := Bytes()
 	b := Bytes()
