@@ -183,15 +183,47 @@ func NewCosignVerifier(pemPubKey []byte) (*CosignVerifier, error) {
 	return &CosignVerifier{PubKey: ec}, nil
 }
 
-// SigTag returns the cosign tag (`sha256-<hex>.sig`) for the given
-// manifest digest (`sha256:<hex>`). Exposed so the M7.1b probe + tests
-// can pre-compute the expected tag for logging.
+// SigTag returns the cosign legacy tag (`sha256-<hex>.sig`) for the
+// given manifest digest (`sha256:<hex>`). Cosign v2 + cosign v3 with
+// the legacy publish layout (the default until cosign v3.x switched to
+// OCI-1.1 mode) use this form. Exposed so the M7.1b probe + tests can
+// pre-compute the expected tag for logging.
 func SigTag(manifestDigest string) (string, error) {
 	algo, hexStr, err := ParseDigest(manifestDigest)
 	if err != nil {
 		return "", err
 	}
 	return algo + "-" + hexStr + ".sig", nil
+}
+
+// SigTagOCI11 returns the cosign OCI-1.1 tag (`sha256-<hex>`, no
+// `.sig` suffix) for the given manifest digest. Cosign v3 with the
+// OCI-1.1 publish mode (`cosign sign --registry-referrers-mode=oci-1-1`
+// or the v3.x default) emits the bundle at this tag. Returned for
+// callers that need the precise form; Verify tries both forms
+// automatically, so most code paths don't need to call this directly.
+func SigTagOCI11(manifestDigest string) (string, error) {
+	algo, hexStr, err := ParseDigest(manifestDigest)
+	if err != nil {
+		return "", err
+	}
+	return algo + "-" + hexStr, nil
+}
+
+// candidateSigTags returns the cosign tag forms Verify will try in
+// order: legacy `.sig`-suffixed first (cosign v2 + legacy v3), then
+// OCI-1.1 unsuffixed (cosign v3 default). Verify uses whichever
+// produces a fetchable manifest with non-zero layers.
+func candidateSigTags(manifestDigest string) ([]string, error) {
+	legacy, err := SigTag(manifestDigest)
+	if err != nil {
+		return nil, err
+	}
+	oci11, err := SigTagOCI11(manifestDigest)
+	if err != nil {
+		return nil, err
+	}
+	return []string{legacy, oci11}, nil
 }
 
 // CanonicalPayload returns the exact byte sequence the cosign signer
@@ -543,18 +575,38 @@ func (v *CosignVerifier) Verify(reg *Registry, ref Ref, manifestDigest string) e
 		return ErrCosignBadManifestDigest
 	}
 
-	// SigTag is infallible here — ParseDigest above guarantees the
-	// hex/algo are well-formed.
-	tag, _ := SigTag(manifestDigest)
-
-	raw, _, err := reg.FetchManifestRaw(tag)
-	if err != nil {
-		return fmt.Errorf("ministack/oci/cosign: fetch .sig manifest %s: %w", tag, err)
+	// candidateSigTags is infallible here — ParseDigest above guarantees
+	// the hex/algo are well-formed. Try legacy `.sig` first (cosign v2 +
+	// legacy v3); fall back to OCI-1.1 unsuffixed (cosign v3 oci-1-1
+	// publish mode) only if the legacy fetch errors out. A successful
+	// response with an empty body is NOT a fall-back trigger — the
+	// registry confirmed the tag exists but says "no signatures here",
+	// which parseSigManifest surfaces as ErrManifestEmpty downstream.
+	tags, _ := candidateSigTags(manifestDigest)
+	var (
+		raw      []byte
+		usedTag  string
+		fetchErr error
+	)
+	for _, t := range tags {
+		r, _, ferr := reg.FetchManifestRaw(t)
+		if ferr != nil {
+			if fetchErr == nil {
+				fetchErr = ferr
+			}
+			continue
+		}
+		raw = r
+		usedTag = t
+		break
+	}
+	if usedTag == "" {
+		return fmt.Errorf("ministack/oci/cosign: fetch .sig manifest (tried %v): %w", tags, fetchErr)
 	}
 
 	m, err := parseSigManifest(raw)
 	if err != nil {
-		return fmt.Errorf("ministack/oci/cosign: parse .sig manifest: %w", err)
+		return fmt.Errorf("ministack/oci/cosign: parse .sig manifest %s: %w", usedTag, err)
 	}
 	if len(m.Layers) == 0 {
 		return ErrCosignSigManifestEmpty

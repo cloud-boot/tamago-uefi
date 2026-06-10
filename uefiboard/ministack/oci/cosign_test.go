@@ -909,3 +909,46 @@ func TestVerifyMixedBothFailReports(t *testing.T) {
 		t.Errorf("want ErrCosignNoMatchingSignature, got %v", err)
 	}
 }
+
+// ----- cosign v3 OCI-1.1 sig-tag fallback (sha256-<hex> no .sig) ----
+
+func TestSigTagOCI11(t *testing.T) {
+	digest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	got, err := SigTagOCI11(digest)
+	if err != nil {
+		t.Fatalf("SigTagOCI11: %v", err)
+	}
+	want := "sha256-1111111111111111111111111111111111111111111111111111111111111111"
+	if got != want {
+		t.Fatalf("SigTagOCI11(%q) = %q, want %q", digest, got, want)
+	}
+}
+
+func TestSigTagOCI11BadDigest(t *testing.T) {
+	if _, err := SigTagOCI11("not-a-digest"); err == nil {
+		t.Fatal("SigTagOCI11 with bad digest: want err, got nil")
+	}
+}
+
+func TestCandidateSigTagsBadDigest(t *testing.T) {
+	if _, err := candidateSigTags("not-a-digest"); err == nil {
+		t.Fatal("candidateSigTags with bad digest: want err, got nil")
+	}
+}
+
+func TestCandidateSigTagsBothForms(t *testing.T) {
+	digest := "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	tags, err := candidateSigTags(digest)
+	if err != nil {
+		t.Fatalf("candidateSigTags: %v", err)
+	}
+	if len(tags) != 2 {
+		t.Fatalf("len(tags) = %d, want 2", len(tags))
+	}
+	if !strings.HasSuffix(tags[0], ".sig") {
+		t.Errorf("tags[0] = %q, want trailing `.sig`", tags[0])
+	}
+	if strings.HasSuffix(tags[1], ".sig") {
+		t.Errorf("tags[1] = %q, want NO trailing `.sig`", tags[1])
+	}
+}
