@@ -279,21 +279,43 @@ const (
 //go:nosplit
 func loadFileGo(this, fp, bp, sizeP, bufP uintptr) uintptr {
 	_ = fp // device path is ignored — Linux EFI-stub passes the root
+
+	// Trace: entered. Always emit this regardless of further
+	// arg-validation outcome so we can confirm the asm trampoline
+	// reached Go at all.
+	traceLabels0 := loadFileTraceLabelsEntry()
+	loadFileTraceLine("loadFileGo: ENTRY",
+		traceLabels0,
+		[]uint64{uint64(this), uint64(fp), uint64(bp), uint64(sizeP), uint64(bufP)})
+
 	// BootPolicy = TRUE means "use boot-manager policy"; the
 	// LoadFile2 protocol explicitly forbids it (UEFI 2.10 §13.5).
 	// Linux's EFI-stub always passes FALSE; reject anything else to
 	// surface a misuse loudly.
-	if bp != 0 {
+	//
+	// R-M8.4a fix (2026-06-10): UEFI BOOLEAN is a UINT8 (one byte),
+	// but on AAPCS64 / MS x64 / LP64 callers are only required to
+	// widen to 32 bits — bits 32..63 of the register are UB. The
+	// previous `bp != 0` check would (and on Linux's EFI-stub
+	// actually did, per the live trace) trip on bits the caller
+	// never zeroed. Compare only the low byte.
+	if uint8(bp) != 0 {
+		loadFileTraceLine("loadFileGo: EFI_UNSUPPORTED (bp byte != 0)", nil, nil)
 		return loadFileEFIUnsupported
 	}
 	if sizeP == 0 {
+		loadFileTraceLine("loadFileGo: EFI_INVALID_PARAMETER (sizeP==nil)", nil, nil)
 		return loadFileEFIInvalidParameter
 	}
 	// Look up the published initrd by `this`. Linear scan over a
 	// fixed-size array (no map lookups → no runtime helpers).
 	var ent loadFileEntry
 	found := false
+	var registeredFirst uintptr
 	for i := 0; i < loadFileRegistrySize; i++ {
+		if loadFileRegistry[i].proto != 0 && registeredFirst == 0 {
+			registeredFirst = loadFileRegistry[i].proto
+		}
 		if loadFileRegistry[i].proto == this && loadFileRegistry[i].proto != 0 {
 			ent = loadFileRegistry[i]
 			found = true
@@ -301,16 +323,25 @@ func loadFileGo(this, fp, bp, sizeP, bufP uintptr) uintptr {
 		}
 	}
 	if !found {
+		loadFileTraceLine("loadFileGo: EFI_NOT_FOUND (this not in registry)",
+			loadFileTraceLabelsLookup(),
+			[]uint64{uint64(this), uint64(registeredFirst)})
 		return loadFileEFINotFound
 	}
 	need := ent.size
 	have := *(*uintptr)(unsafe.Pointer(sizeP))
+	loadFileTraceLine("loadFileGo: registry HIT",
+		loadFileTraceLabelsHit(),
+		[]uint64{uint64(this), uint64(ent.body), uint64(need), uint64(have), uint64(bufP)})
 	if bufP == 0 || have < need {
 		// Size-query path (or undersized buffer): publish the
 		// required size and return EFI_BUFFER_TOO_SMALL. The
 		// EFI-stub will re-allocate and re-call with a big-enough
 		// buffer.
 		*(*uintptr)(unsafe.Pointer(sizeP)) = need
+		loadFileTraceLine("loadFileGo: EFI_BUFFER_TOO_SMALL (size-query or undersized)",
+			loadFileTraceLabelsSize(),
+			[]uint64{uint64(need)})
 		return loadFileEFIBufferTooSmall
 	}
 	// Transfer path. Manual byte loop to avoid runtime.memmove
@@ -322,5 +353,32 @@ func loadFileGo(this, fp, bp, sizeP, bufP uintptr) uintptr {
 		*(*byte)(unsafe.Pointer(bufP + i)) = *(*byte)(unsafe.Pointer(ent.body + i))
 	}
 	*(*uintptr)(unsafe.Pointer(sizeP)) = need
+	loadFileTraceLine("loadFileGo: EFI_SUCCESS (transfer complete)",
+		loadFileTraceLabelsSize(),
+		[]uint64{uint64(need)})
 	return loadFileEFISuccess
 }
+
+// Trace label sets. Returning a package-global []string from a
+// helper avoids constructing slice headers inside the nosplit body
+// of loadFileGo (slice literals would emit runtime.newobject calls
+// under -gcflags=-N -l; the package-level vars are static storage).
+//
+//go:nosplit
+func loadFileTraceLabelsEntry() []string { return loadFileTraceLabelsEntryV }
+
+//go:nosplit
+func loadFileTraceLabelsLookup() []string { return loadFileTraceLabelsLookupV }
+
+//go:nosplit
+func loadFileTraceLabelsHit() []string { return loadFileTraceLabelsHitV }
+
+//go:nosplit
+func loadFileTraceLabelsSize() []string { return loadFileTraceLabelsSizeV }
+
+var (
+	loadFileTraceLabelsEntryV  = []string{"this", "fp", "bp", "sizeP", "bufP"}
+	loadFileTraceLabelsLookupV = []string{"this", "registered[0]"}
+	loadFileTraceLabelsHitV    = []string{"this", "body", "need", "have", "bufP"}
+	loadFileTraceLabelsSizeV   = []string{"need"}
+)

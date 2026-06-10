@@ -728,14 +728,17 @@ func runKernelBootLinuxKernel() {
 	//   3. None — pre-M8.4 cmdline-only behaviour (panics on most
 	//      kernels for lack of rootfs).
 	//
-	// R-M8.4a debug instrumentation (2026-06-10): enable the
-	// nosplit ConOut trace inside loadFileGo BEFORE PublishInitrd
-	// so any callback the EFI-stub makes paints a diagnostic line
-	// on the serial console. Cheap (a few hundred bytes per call)
-	// and safe to leave on for the M8.4 debug window — the trace
-	// goes through the same printk → ConOut → firmware-out path
-	// the kernel EFI-stub itself uses.
-	uefiboard.LoadFileTraceEnabled = true
+	// R-M8.4a diagnostic instrumentation (2026-06-10, retained but
+	// gated): `uefiboard.LoadFileTraceEnabled` can be flipped to
+	// `true` here to paint a per-callback diagnostic line on the
+	// serial console (this/fp/bp/sizeP/bufP at entry, registry
+	// hit/miss, have/need, EFI_STATUS at return). Used to diagnose
+	// the off-by-one Go-ABI0-slot bug in the per-arch trampoline
+	// that caused `EFI stub: ERROR: Failed to load initrd!` on
+	// every two-call dance. Left wired (and off by default) so a
+	// future regression can re-enable in one line without
+	// re-developing the helper.
+	//   uefiboard.LoadFileTraceEnabled = true
 	var initrdHandle uintptr
 	switch {
 	case kernelBootInitrdRef != "":

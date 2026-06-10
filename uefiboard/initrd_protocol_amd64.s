@@ -45,6 +45,19 @@
 // Total: 120 bytes (multiple of 8; the CALL pushes 8 more so the
 // post-CALL frame is 16-byte aligned as Go expects for SSE).
 // We round up to 128 to keep RSP 16-aligned at THIS frame too.
+//
+// Why no +8 reservation here (unlike the arm64 / riscv64 /
+// loong64 sibling files): on amd64 the CALL instruction itself
+// pushes the 8-byte return address before the callee runs, so the
+// `loadFileGo.abi0` wrapper sees its incoming args at
+// `caller_SP_at_CALL + 0..N*8 - 1`. The CALL-pushed return address
+// occupies the slot the ABI0 layout would otherwise reserve as the
+// "saved LR" word. On the load/store arches (arm64 / riscv64 /
+// loong64) the BL / JAL / CALL instruction stores LR in a register
+// (X30 / X1 / R1) and DOES NOT push to memory, so those trampolines
+// must reserve the +0 slot themselves and store args at SP+8..SP+40
+// — see e.g. initrd_protocol_arm64.s where the layout starts at
+// +8 and ends at +48.
 
 #include "textflag.h"
 
@@ -70,6 +83,8 @@ TEXT ·loadFile_trampoline(SB),NOSPLIT|NOFRAME,$0
 	MOVQ	168(SP), AX
 
 	// Marshal EFI args into Go ABI0 outgoing slots at SP+0..SP+32.
+	// On amd64 the CALL-pushed return address provides the +0 slot
+	// that the load/store arches must reserve manually.
 	MOVQ	CX, 0(SP)   // this  (was RCX)
 	MOVQ	DX, 8(SP)   // filePath (was RDX)
 	MOVQ	R8, 16(SP)  // bp
