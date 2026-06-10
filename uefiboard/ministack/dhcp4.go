@@ -250,6 +250,24 @@ func parseDHCP4Message(buf []byte) (xid uint32, yiaddr net.IP, opts dhcp4Options
 	if err != nil {
 		return 0, nil, nil, err
 	}
+	// BOOTP-legacy `file` field fallback: when the server uses the
+	// 128-byte `file` field at offset 108..236 (BOOTP / RFC 951 §3)
+	// instead of option 67, surface the value through the same
+	// opts[67] slot so dhcp4LeaseFromOptions's BootfileName path
+	// finds it. QEMU's SLIRP DHCP server uses this `file` field when
+	// `-netdev user,bootfile=...` is configured (verified empirically
+	// against qemu-9.2.0). Only fill if option 67 was NOT explicitly
+	// present — the option-67 path wins per RFC 2132 §9.5.
+	if _, has67 := opts[dhcp4OptBootfileName]; !has67 {
+		bf := buf[108:236]
+		end := 0
+		for end < len(bf) && bf[end] != 0 {
+			end++
+		}
+		if end > 0 {
+			opts[dhcp4OptBootfileName] = append([]byte(nil), bf[:end]...)
+		}
+	}
 	return xid, yiaddr, opts, nil
 }
 
