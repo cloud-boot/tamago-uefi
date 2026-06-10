@@ -26,6 +26,25 @@
 //   leave the rest — Go's compiler does not emit floating-point on
 //   our nosplit handler).
 //
+// R-amd64j Phase 3 (2026-06-10) — INCONCLUSIVE under the time cap.
+// Phase-3 four-candidate COM1 dump (BP=168(SP), S8=R8, A=160(SP),
+// C=176(SP)) of the EFI-stub-on-amd64 LoadFile2 invocation showed
+// the 5th arg is NEITHER cleanly at the textbook MS x64 offset 168
+// NOR consistently at R8 (SysV) NOR at 176. Values varied
+// run-to-run with the asm prologue's stack disruption; bufP=
+// 0x04C00000 (offset 168, run-1) actually produced a valid byte
+// landing per the Go-side bufP[0]_post==0x1f check, but the kernel
+// later read garbage from the kernel-stub-allocated buffer
+// elsewhere → still "Initramfs unpacking failed: invalid magic".
+// Phase 3 ruled out the "pure trampoline-arg mismatch" + "pure
+// firmware double-buffer" theory split — the true failure mode is
+// stranger and needs Phase-4 inspection (likely a low-memory
+// reclaim during ExitBootServices on amd64 OVMF stomping the
+// LoadFile2-target buffer before the kernel proper reads it).
+// See docs/m8-r-amd64j-phase3-findings.md for the full dump
+// + theory walkthrough. Reverting to 168 (per spec) until the
+// Phase-4 root cause is identified.
+//
 // Frame layout (top-down, post-SUB):
 //   SP+0    arg this
 //   SP+8    arg filePath
