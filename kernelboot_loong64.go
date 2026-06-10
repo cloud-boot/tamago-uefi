@@ -25,8 +25,14 @@
 //     See cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.4
 //     "self-publish" for the toolchain doc.
 //
-// ttl.sh is 24h-anonymous; the constant below is valid until ~24h
-// after the last publish. For permanence, re-publish via:
+// ttl.sh is 24h-anonymous; the constant below references a tag that
+// is REPUBLISHED nightly by .github/workflows/vmlinuz-nightly.yml
+// (cron 04:00 UTC). The tag URL is stable across runs — the
+// underlying blob digest rotates with each upstream Debian rebuild,
+// but the in-tree consumer discovers the digest from the manifest at
+// boot so the rotation is transparent.
+//
+// Manual re-publish (one-shot, if the cron is stale):
 //
 //   /tmp/cb-extract/cloudboot-oci-extract \
 //     -src 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-binary-7.0.12+deb14-loong64_7.0.12-1_loong64.deb' \
@@ -34,9 +40,11 @@
 //     -dst 'ttl.sh/cloudboot-vmlinuz-loong64:24h' \
 //     -cmdline-hint 'console=ttyS0,115200'
 //
-// Follow-up: nightly GitHub Action under cloud-boot/ops, or
-// PAT-authenticated push to ghcr.io/cloud-boot/vmlinuz-loong64 for
-// permanence.
+// Stable-tag alternative (no TTL): once GHCR_TOKEN repo secret is
+// provisioned (see cloud-boot/docs §M8.4 self-publish "Secret
+// provisioning"), the same workflow ALSO pushes to
+// ghcr.io/cloud-boot/vmlinuz-loong64:latest. To switch the boot
+// consumer over, change kernelBootTargetRef below to that ref.
 
 //go:build phase2_oci_kernel_boot && tamago && loong64
 

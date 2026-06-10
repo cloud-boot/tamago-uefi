@@ -1,0 +1,123 @@
+# Copyright 2026 The cloud-boot Authors.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Nightly republish of the riscv64 + loong64 EFI-stub vmlinuz OCI
+# artifacts referenced by kernelboot_riscv64.go / kernelboot_loong64.go.
+#
+# Why: ttl.sh tags expire 24h after the last push. Without this cron
+# the live M8.4 MODE C demo breaks daily. This workflow re-extracts
+# from the upstream Debian .deb and re-pushes to the same ttl.sh tag,
+# resetting the TTL clock to T+24h each morning.
+#
+# Two push legs per arch:
+#
+#   1. PRIMARY (always runs): anonymous push to ttl.sh/cloudboot-
+#      vmlinuz-<arch>:24h. Same path that powers the live demo today.
+#      No secret required.
+#
+#   2. SECONDARY (gated on GHCR_TOKEN repo secret): bearer-auth push
+#      to ghcr.io/cloud-boot/vmlinuz-<arch>:latest. Permanent — no
+#      TTL — once provisioned. To enable, run ONCE on the repo
+#      maintainer's machine:
+#
+#        gh auth refresh -h github.com -s write:packages
+#        TOKEN=$(gh auth token)
+#        gh secret set GHCR_TOKEN --body "$TOKEN" \
+#          --repo cloud-boot/tamago-uefi
+#
+#      Or, if using a fine-grained PAT:
+#
+#        # at https://github.com/settings/tokens, create a classic PAT
+#        # with scope: write:packages (and read:packages)
+#        gh secret set GHCR_TOKEN --body <paste-PAT> \
+#          --repo cloud-boot/tamago-uefi
+#
+#      The secondary leg is skipped (one-line notice in the log) when
+#      GHCR_TOKEN is absent. The workflow still passes as long as the
+#      primary ttl.sh leg succeeds.
+
+name: vmlinuz-nightly
+
+on:
+  schedule:
+    # 04:00 UTC daily — ~20h after a typical previous-day push, well
+    # within the ttl.sh 24h window so the demo never gaps.
+    - cron: '0 4 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  # packages: write is NOT requested via GITHUB_TOKEN because ghcr.io
+  # uses a separate PAT (GHCR_TOKEN secret) so the publish identity
+  # is the cloud-boot maintainer rather than the workflow runner.
+
+jobs:
+  republish:
+    name: republish vmlinuz (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: riscv64
+            src: 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-image-6.12.90+deb13.1-riscv64_6.12.90-2_riscv64.deb'
+            ttl_dst: 'ttl.sh/cloudboot-vmlinuz-riscv64:24h'
+            ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-riscv64:latest'
+            cmdline_hint: 'console=hvc0 earlycon=sbi'
+          - arch: loong64
+            src: 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-binary-7.0.12+deb14-loong64_7.0.12-1_loong64.deb'
+            ttl_dst: 'ttl.sh/cloudboot-vmlinuz-loong64:24h'
+            ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-loong64:latest'
+            cmdline_hint: 'console=ttyS0,115200'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+
+      - name: Build cloudboot-oci-extract
+        run: |
+          GOWORK=off go build -o /tmp/cloudboot-oci-extract \
+            ./cmd/cloudboot-oci-extract/
+          /tmp/cloudboot-oci-extract -h || true
+
+      - name: Republish ${{ matrix.arch }} (ttl.sh primary, ghcr.io if GHCR_TOKEN set)
+        env:
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+        run: |
+          set -euo pipefail
+          ARGS=(
+            -src "${{ matrix.src }}"
+            -arch "${{ matrix.arch }}"
+            -dst "${{ matrix.ttl_dst }}"
+            -cmdline-hint "${{ matrix.cmdline_hint }}"
+          )
+          if [ -n "${GHCR_TOKEN:-}" ]; then
+            echo "::notice::ghcr.io push ENABLED (GHCR_TOKEN secret present)"
+            ARGS+=( -push-to-ghcr "${{ matrix.ghcr_dst }}" )
+          else
+            echo "::notice::ghcr.io push skipped: no GHCR_TOKEN secret"
+          fi
+          /tmp/cloudboot-oci-extract "${ARGS[@]}"
+
+      - name: Smoke-pull manifest from ttl.sh
+        run: |
+          set -euo pipefail
+          # Confirm the freshly-published tag is fetchable via the
+          # OCI Distribution v2 endpoint. Splits ref host/repo:tag.
+          REF='${{ matrix.ttl_dst }}'
+          HOST="${REF%%/*}"                   # ttl.sh
+          REST="${REF#*/}"                    # cloudboot-vmlinuz-…:24h
+          REPO="${REST%:*}"                   # cloudboot-vmlinuz-…
+          TAG="${REST##*:}"                   # 24h
+          URL="https://${HOST}/v2/${REPO}/manifests/${TAG}"
+          echo "smoke-pull: ${URL}"
+          curl -fsSL -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            "${URL}" | head -c 4096
+          echo
+          echo "::notice::ttl.sh manifest smoke-pull PASS for ${REF}"

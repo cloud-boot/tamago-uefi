@@ -53,8 +53,18 @@
 // Why ttl.sh: it accepts anonymous PUTs (validated 2026-06-10 with
 // `curl -XPOST https://ttl.sh/v2/<any-repo>/blobs/uploads/` → 202)
 // and lives 24h. Long enough to populate the per-arch consts and
-// run a live test. Permanent re-publish belongs in a follow-up
-// nightly GitHub Action.
+// run a live test. Permanent re-publish lives in the nightly
+// workflow `.github/workflows/vmlinuz-nightly.yml` (cron 04:00 UTC).
+//
+// Permanence path (M8.4 follow-up, 2026-06-10): pass
+// `-push-to-ghcr ghcr.io/<owner>/<repo>:<tag>` and set env-var
+// `GHCR_TOKEN` to a `write:packages` PAT. The tool then performs a
+// SECOND push leg with `Authorization: Bearer $GHCR_TOKEN` on every
+// POST/PUT, after the first (anonymous) ttl.sh leg succeeds. The two
+// pushes are independent — ttl.sh failing does NOT skip ghcr.io and
+// vice versa; both errors are reported, and exit-code is non-zero if
+// either fails. If `-push-to-ghcr` is empty OR `GHCR_TOKEN` is unset
+// the secondary leg is skipped silently with a single-line notice.
 
 package main
 
@@ -118,6 +128,7 @@ func main() {
 	src := flag.String("src", "", "source URL: deb:https://... or oci:host/repo:tag")
 	arch := flag.String("arch", "", "target arch: riscv64 | loong64 | loongarch64 | arm64 | amd64")
 	dst := flag.String("dst", "", "destination OCI ref: host/repo:tag (e.g. ttl.sh/foo:24h)")
+	pushToGHCR := flag.String("push-to-ghcr", "", "optional secondary destination on ghcr.io (e.g. ghcr.io/cloud-boot/vmlinuz-riscv64:latest); reads PAT from env GHCR_TOKEN (scope: write:packages); skipped silently if empty or GHCR_TOKEN unset")
 	cmdlineHint := flag.String("cmdline-hint", "", "optional kernel cmdline to embed as manifest annotation")
 	flag.Parse()
 
@@ -188,15 +199,40 @@ func main() {
 		log.Fatalf("manifest marshal: %v", err)
 	}
 
-	log.Printf("step 4/4: push to %s", *dst)
-	if err := pushOCI(*dst, configJSON, configDig, layer, layerDig, manifestJSON); err != nil {
-		log.Fatalf("push: %v", err)
+	log.Printf("step 4/4: push to %s (anonymous)", *dst)
+	primaryErr := pushOCI(*dst, "", configJSON, configDig, layer, layerDig, manifestJSON)
+	if primaryErr != nil {
+		log.Printf("           PRIMARY push FAILED: %v", primaryErr)
+	} else {
+		fmt.Printf("\nPUSHED %s\n", *dst)
+		fmt.Printf("  kernel:   %s (raw %d bytes, layer tar.gz %d bytes, %s)\n", kernelName, len(kernel), len(layer), layerDig)
+		fmt.Printf("  manifest: %d bytes\n", len(manifestJSON))
+		fmt.Printf("  pull via: curl -L https://%s/v2/%s/blobs/%s\n",
+			hostOf(*dst), repoOf(*dst), layerDig)
 	}
-	fmt.Printf("\nPUSHED %s\n", *dst)
-	fmt.Printf("  kernel:   %s (raw %d bytes, layer tar.gz %d bytes, %s)\n", kernelName, len(kernel), len(layer), layerDig)
-	fmt.Printf("  manifest: %d bytes\n", len(manifestJSON))
-	fmt.Printf("  pull via: curl -L https://%s/v2/%s/blobs/%s\n",
-		hostOf(*dst), repoOf(*dst), layerDig)
+
+	// Secondary leg: ghcr.io permanent push (bearer-auth).
+	var secondaryErr error
+	switch {
+	case *pushToGHCR == "":
+		log.Printf("ghcr.io push skipped: -push-to-ghcr flag empty")
+	case os.Getenv("GHCR_TOKEN") == "":
+		log.Printf("ghcr.io push skipped: no GHCR_TOKEN secret")
+	default:
+		log.Printf("step 4b: push to %s (bearer-auth ghcr.io)", *pushToGHCR)
+		token := os.Getenv("GHCR_TOKEN")
+		secondaryErr = pushOCI(*pushToGHCR, token, configJSON, configDig, layer, layerDig, manifestJSON)
+		if secondaryErr != nil {
+			log.Printf("           GHCR push FAILED: %v", secondaryErr)
+		} else {
+			fmt.Printf("\nPUSHED %s\n", *pushToGHCR)
+			fmt.Printf("  pull via: docker pull %s\n", *pushToGHCR)
+		}
+	}
+
+	if primaryErr != nil || secondaryErr != nil {
+		os.Exit(1)
+	}
 }
 
 // packageAsTarGz wraps `data` inside a tar.gz with a single entry
@@ -463,15 +499,26 @@ func tagOf(ref string) string {
 	return "latest"
 }
 
-func pushOCI(ref string, configJSON []byte, configDig digest.Digest, layer []byte, layerDig digest.Digest, manifestJSON []byte) error {
+// pushOCI performs OCI Distribution v2 anonymous push when
+// bearerToken == "", or bearer-auth push (used for ghcr.io) when
+// bearerToken is non-empty. The bearer token is attached to every
+// POST and PUT in the upload sequence.
+func pushOCI(ref, bearerToken string, configJSON []byte, configDig digest.Digest, layer []byte, layerDig digest.Digest, manifestJSON []byte) error {
 	host := hostOf(ref)
 	repo := repoOf(ref)
 	tag := tagOf(ref)
 	scheme := "https"
 
+	authReq := func(req *http.Request) {
+		if bearerToken != "" {
+			req.Header.Set("Authorization", "Bearer "+bearerToken)
+		}
+	}
+
 	uploadBlob := func(blob []byte, dig digest.Digest) error {
 		postURL := fmt.Sprintf("%s://%s/v2/%s/blobs/uploads/", scheme, host, repo)
 		req, _ := http.NewRequest("POST", postURL, nil)
+		authReq(req)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("POST uploads: %w", err)
@@ -496,6 +543,7 @@ func pushOCI(ref string, configJSON []byte, configDig digest.Digest, layer []byt
 		req2, _ := http.NewRequest("PUT", putURL, bytes.NewReader(blob))
 		req2.Header.Set("Content-Type", "application/octet-stream")
 		req2.ContentLength = int64(len(blob))
+		authReq(req2)
 		resp2, err := http.DefaultClient.Do(req2)
 		if err != nil {
 			return fmt.Errorf("PUT blob: %w", err)
@@ -520,6 +568,7 @@ func pushOCI(ref string, configJSON []byte, configDig digest.Digest, layer []byt
 	req, _ := http.NewRequest("PUT", manifestURL, bytes.NewReader(manifestJSON))
 	req.Header.Set("Content-Type", ocispec.MediaTypeImageManifest)
 	req.ContentLength = int64(len(manifestJSON))
+	authReq(req)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("PUT manifest: %w", err)
