@@ -259,81 +259,103 @@ goroutine sum: 499500
 DONE
 ```
 
-## Phase 2 (in progress) — OCI pre-boot loader (shape A)
+## Phase 2 — pure-Go bare-metal UEFI loader (live end-to-end on 3/4 arches)
 
 Phase 2 turns this image into a PXE-class pre-boot agent that runs
 inside UEFI Boot Services, fetches a `kernel + initrd` OCI artifact
-over HTTPS, verifies a signature, calls `ExitBootServices`, and
-hands control to the loaded Linux kernel. It replaces the historical
-`PXE + iPXE + systemd-boot` chain with a single statically-linked Go
-application.
+over HTTPS, verifies a cosign signature, and chain-boots the Linux
+kernel via `LoadImage` + `StartImage` — replacing the historical
+`PXE + iPXE + systemd-boot` chain with a single statically-linked
+pure-Go application on the real Go runtime.
 
-Design doc: [`cloud-boot/docs/tamago-uefi-phase2-oci-loader.md`](https://github.com/cloud-boot/docs/blob/main/tamago-uefi-phase2-oci-loader.md).
+Design doc:
+[`cloud-boot/docs/tamago-uefi-phase2-oci-loader.md`](https://github.com/cloud-boot/docs/blob/main/tamago-uefi-phase2-oci-loader.md)
+— the milestone-by-milestone design log, continuously updated.
 
-Architectural decision: **Path X = drive UEFI Boot Service protocols**
-(`EFI_HTTP_PROTOCOL`, `EFI_DHCP4_PROTOCOL`, `EFI_TLS_PROTOCOL`,
-`EFI_TCP4_PROTOCOL`) rather than write a virtio-net + TCP/IP + TLS
-stack in pure Go. Shape A only needs network *pre-EBS*, so reusing
-the firmware's well-tested NetworkPkg is the right call.
+Architectural pivot (2026-06-07, ref design doc §2): the original
+"Path X = drive `EFI_HTTP_PROTOCOL` + `EFI_DHCP4_PROTOCOL` + `EFI_TLS_PROTOCOL`"
+plan was abandoned after Apple `Virtualization.framework`'s firmware
+was confirmed to expose only `BlockIO` / `SFS` / `SimpleNetwork`
+(no `HTTP` / `TCP4` / `DHCP4` / `DNS4`) and virtio-net rejects
+`FEATURES_OK` from any UEFI-context client. Phase 2 adopted
+**Path Y = pure-Go network + crypto stack on top of virtio-net via
+`EFI_PCI_IO_PROTOCOL`**, which doesn't need any networking protocol
+from the firmware. Same loader now boots under QEMU/OVMF, Apple VZ,
+and EDK2 hardware.
 
-Milestones:
+### End-to-end pipeline
 
-| ID | Scope                                                             | Status |
-| -- | ----------------------------------------------------------------- | ------ |
-| M0 | Design doc, type surface, GetMemoryMap probe                      | done   |
-| M1 | DHCP4 + plaintext HTTP fetch                                      | next   |
-| M2 | TLS + HTTPS (highest-risk milestone)                              | future |
-| M3 | OCI registry client + signature verification                      | future |
-| M4 | Post-EBS memory + per-arch Linux handoff                          | future |
+```text
+PCI walk -> virtio-net -> DHCPv4 -> DNS -> TLS (CCADB roots) -> HTTPS
+  -> OCI Distribution v2 walk -> multi-arch index -> manifest
+  -> streaming blob fetch -> SHA-256 verify -> cosign keyed verify
+  -> LoadImage -> SetLoadOptions(cmdline) -> PublishDTB -> PublishInitrd
+  -> PublishRNG -> StartImage -> Linux EFI-stub
+  -> "Booting Linux Kernel..." -> real distro kernel
+```
 
-### M0 — done 2026-06-07
+### Milestones shipped
 
-`uefiboard/` gained the type surface for the upcoming milestones:
+| ID | Scope | Status |
+| -- | ----- | ------ |
+| **M0**     | Design doc, type surface, `GetMemoryMap` probe                                                                  | SHIPPED |
+| **M1..M3** | virtio-net device discovery, init, gvisor `netstack` `LinkEndpoint` (ARP + IPv4 + ICMP echo)                    | SHIPPED |
+| **M4**     | pure-Go DHCPv4 client                                                                                            | SHIPPED 2026-06-08 |
+| **M5**     | pure-Go DNS + HTTP GET over the ministack                                                                        | SHIPPED 2026-06-08 |
+| **M6**     | TLS + HTTPS GET via stdlib `crypto/tls` over the ministack (CCADB roots)                                         | SHIPPED 2026-06-08 |
+| **M6.1**   | EDK2 OVMF image-protection bug ID'd + 3 upstream commits (`5ccb5fff02`, `867fad874a`, `b5bab75e58`) — fix lands in `edk2-stable202511`+ ; pantry recipe in [pkgxdev/pantry#13239](https://github.com/pkgxdev/pantry/pull/13239) | SHIPPED |
+| **M6.2**   | [`go-coff/efipack`](https://github.com/go-coff/efipack) — PE32+ self-extracting compressor (flate + LZFSE, host-side + per-arch stubs) ; M6.2 PR2 GREEN on arm64 + riscv64 + loong64 | SHIPPED |
+| **M7**     | pure-Go OCI Distribution v2 registry client                                                                      | SHIPPED 2026-06-08 |
+| **M7.1a**  | streaming OCI blob fetch                                                                                         | SHIPPED 2026-06-09 |
+| **M7.1b**  | cosign keyed signature verification                                                                              | SHIPPED 2026-06-09 |
+| **M7-alt** | `oras-go` POC evaluated and parked — `net/http.Client.Do` deadlocks under the TamaGo + UEFI scheduler            | PARKED  |
+| **M8.0**   | `LoadImage` + `StartImage` chain-boot mechanism                                                                  | SHIPPED 2026-06-09 |
+| **M8.1**   | Minimal end-to-end MODE B (streaming OCI fetch -> LoadImage -> StartImage on 3/4 arches)                         | SHIPPED 2026-06-09 |
+| **M8.2**   | Framework : `SetLoadOptions` + `PublishInitrd`                                                                    | SHIPPED 2026-06-09 |
+| **M8.3**   | Live MODE C kernel boot via OCI — arm64 against `ghcr.io/siderolabs/kernel` ; riscv64 + loong64 self-published via `cmd/cloudboot-oci-extract` (Debian linux-image .deb → tar.gz → ttl.sh, nightly cron) | SHIPPED 2026-06-10 |
+| **M8.4**   | DTB `ConfigurationTable` probe + per-arch `LoadFile2` trampoline (all 4 arches)                                  | SHIPPED 2026-06-10 |
+| **M8.5**   | Real-ELF `/init` in embedded initramfs (573 KiB cpio.gz, pure-Go arm64) — R-M8.5a CLOSED by M8.6                 | SHIPPED 2026-06-10 |
+| **M8.6**   | `PublishDTB` via `gBS->InstallConfigurationTable` + embedded arm64-virt DTB — R-M8.5a CLOSED                     | SHIPPED 2026-06-10 |
+| **M8.7**   | `PublishRNG` + cmdline `nokaslr random.trust_bootloader=0 random.trust_cpu=0` — R-M8.6a CLOSED                   | SHIPPED 2026-06-10 |
+| **M8.8**   | Post-EBS pl011 serial routing cmdline cleanup (drop `acpi=force`, add `keep_bootcon` + `earlyprintk=keep` + `printk.time=y`) | SHIPPED 2026-06-10 |
+| **M8.9**   | R-M8.8a chase — pre-EBS Data Abort in EDK2 DXE region (kernel→firmware path)                                     | next |
 
-- `ebs.go` — `ExitBootServices(mapKey)` thunk (not called from Phase 1).
+### Live status per arch (2026-06-10)
+
+| arch    | M0..M7 | M8.0 chain-boot | M8.3 live kernel boot | Notes |
+| ------- | ------ | --------------- | --------------------- | ----- |
+| **arm64**   | ✅ | ✅ | ✅ | `ghcr.io/siderolabs/kernel` ; EFI-stub `Booting Linux Kernel...` + KASLR-disabled + DTB-via-ConfigurationTable + initrd-via-LoadFile2 |
+| **riscv64** | ✅ | ✅ | ✅ | self-published via `cmd/cloudboot-oci-extract` from Debian `linux-image-6.12.90+deb13.1-riscv64` → `ttl.sh/cloudboot-vmlinuz-riscv64:24h` ; nightly cron re-publish |
+| **loong64** | ✅ | ✅ | ✅ | self-published via `cmd/cloudboot-oci-extract` from Debian `linux-binary-7.0.12+deb14-loong64` → `ttl.sh/cloudboot-vmlinuz-loong64:24h` ; nightly cron re-publish |
+| **amd64**   | ✅ | ⚠️ | 🚧 | EDK2 OVMF firmware bug chase (`R-amd64a..g`) ; `R-amd64f #2` bypassed the firmware bug, currently chasing a Go-runtime `cannot allocate memory` regression in `R-amd64g`. LIVE not yet green. |
+
+### M0 probe (historical reference)
+
+`uefiboard/` gained the M0 type surface :
+
+- `ebs.go` — `ExitBootServices(mapKey)` thunk.
 - `memorymap.go` + `memorymap_tamago.go` — `MemoryDescriptor` type +
-  `GetMemoryMap()` wrapper. Stride-aware parser (firmware reports
-  `DescriptorSize` = 48 on every working arch — 40 spec + 8
-  firmware-private bytes — and the parser honours that).
-- `http_protocol.go` — GUIDs and Go struct shapes for the
-  `EFI_HTTP_PROTOCOL` family. No method calls yet; M1 wires them.
+  `GetMemoryMap()` wrapper (stride-aware ; firmware reports
+  `DescriptorSize=48`).
+- `http_protocol.go` — GUIDs and Go struct shapes (kept for
+  diagnostic builds ; the live Phase 2 loader doesn't use them).
 
 A `-tags phase2_probe` build of `main.go` calls `GetMemoryMap`,
 prints `descriptors=`, `descriptorSize=`, `mapKey=` and per-type RAM
-totals to ConOut, then halts. The default build (no `phase2_probe`
-tag) keeps Phase 1's banner-only behaviour bit-for-bit.
+totals to ConOut, then halts. The default build keeps Phase 1's
+banner-only behaviour bit-for-bit.
 
-Build the probe EFIs:
+Build the probe EFIs :
 
 ```sh
 task probe:memory:all          # all four arches
 task probe:memory:amd64        # one arch
 ```
 
-The four resulting `BOOT<ARCH>-PROBE.EFI` artifacts pack into a
-multi-arch ISO via `cloud-boot/iso`'s existing pipeline.
-
-End-to-end M0 probe results under QEMU + EDK2-stable202408:
-
-| arch    | descriptors | DescriptorSize | Conventional RAM | status                                                        |
-| ------- | ----------: | -------------: | ---------------: | ------------------------------------------------------------- |
-| amd64   |         119 |             48 |      ~2.09 GiB   | PASS                                                          |
-| arm64   |          31 |             48 |      ~4.22 GiB   | PASS                                                          |
-| loong64 |          51 |             48 |      ~4.18 GiB   | PASS                                                          |
-| riscv64 |         n/a |            n/a |             n/a  | EDK2 faults on NULL `DescriptorVersion` — see design doc §5 R-M0a |
-
-riscv64 has a real M0 finding: EDK2's
-`MdeModulePkg/Core/Dxe/Mem/Page.c::CoreGetMemoryMap` on this arch
-unconditionally writes `*DescriptorVersion` even when the caller
-passes NULL. The other three arches' EDK2 builds guard the write.
-Mitigation deferred to M1, which already needs to extend `efiCall`
-from 4-arg to 5-arg for `LoadImage` (M4).
-
-Host-side unit tests cover the parser + GUID byte layouts:
+Host-side unit tests cover the parser + GUID byte layouts :
 
 ```sh
 task uefiboard:test
-# coverage: 94.9% of statements (above the >=80% target)
 ```
 
 ## Follow-ups
