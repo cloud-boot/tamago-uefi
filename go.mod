@@ -3,6 +3,8 @@ module github.com/cloud-boot/tamago-uefi
 go 1.26.3
 
 require (
+	github.com/go-filesystems/interface v0.0.0
+	github.com/go-filesystems/ufs v0.0.0
 	github.com/go-virtio/common v0.1.4
 	github.com/go-virtio/console v0.1.0
 	github.com/go-virtio/net v0.1.0
@@ -27,3 +29,7 @@ require (
 )
 
 replace github.com/usbarmory/tamago => ../../usbarmory/tamago
+
+replace github.com/go-filesystems/interface => ../../go-filesystems/interface
+
+replace github.com/go-filesystems/ufs => ../../go-filesystems/ufs

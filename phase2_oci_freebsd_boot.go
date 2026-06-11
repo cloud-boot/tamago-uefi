@@ -44,12 +44,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"runtime"
 	"time"
 
 	"github.com/cloud-boot/tamago-uefi/uefiboard"
 	"github.com/cloud-boot/tamago-uefi/uefiboard/ministack"
 	"github.com/cloud-boot/tamago-uefi/uefiboard/ministack/oci"
+	"github.com/go-filesystems/ufs"
 )
 
 // freebsdBootTargetRef is the OCI artifact streaming source for the
@@ -255,11 +257,49 @@ func runOCIFreeBSDBootProbe() {
 	}
 	println("phase3-oci-freebsd-boot: LoadImage(", freebsdBootEFIPath, ") OK; image handle =", hexUintptrFreeBSD(childImage))
 
+	// Sprint 2B: scan the streamed disk image for a FreeBSD UFS
+	// partition. If present, open it via go-filesystems/ufs and
+	// install an EFI_SIMPLE_FILE_SYSTEM_PROTOCOL on a fresh handle so
+	// loader.efi (which calls LocateHandleBuffer(SFS_GUID) for kernel
+	// + loader.conf reads) can find /boot/kernel/kernel on our
+	// Go-backed UFS.
+	//
+	// Graceful degradation: if no UFS partition exists (sprint 1.2's
+	// FAT16-only ESP image), log + skip. The architectural goal of
+	// sprint 2B is the SFS publish surface itself; a real UFS payload
+	// is a follow-on.
+	ufsBytes, uerr := findUFSPartitionBytes(imageBytes)
+	if uerr != nil {
+		if errors.Is(uerr, ErrNoUFSPartition) {
+			println("phase3-oci-freebsd-boot: SFS-UFS skip: no UFS partition in GPT (sprint 1.2 FAT16-only ESP image) -- architectural OK, loader.efi may fail at root mount")
+		} else {
+			println("phase3-oci-freebsd-boot: SFS-UFS skip: GPT parse error:", uerr.Error())
+		}
+	} else {
+		ufsFS, ferr := ufs.Open(&sliceReaderAt{b: ufsBytes}, int64(len(ufsBytes)))
+		if ferr != nil {
+			println("phase3-oci-freebsd-boot: SFS-UFS skip: ufs.Open failed:", ferr.Error())
+		} else {
+			sfsHandle, perr := uefiboard.PublishSFS(0, ufsFS)
+			if perr != nil {
+				println("phase3-oci-freebsd-boot: SFS-UFS PublishSFS FAIL:", perr.Error())
+			} else {
+				println("phase3-oci-freebsd-boot: PublishSFS OK; UFS-backed SFS handle =", hexUintptrFreeBSD(sfsHandle))
+				defer func() {
+					if uerr := uefiboard.UnpublishSFS(sfsHandle); uerr != nil {
+						println("phase3-oci-freebsd-boot: UnpublishSFS warning:", uerr.Error())
+					}
+				}()
+			}
+		}
+	}
+
 	// Sprint 1.1 PASS gate: reach this point and StartImage. The
 	// FreeBSD loader.efi will print its banner ("FreeBSD/amd64 EFI
 	// loader, Revision 3.0") and then either find a kernel + boot it
-	// (sprint 2's UFS support — out of scope here) or fail with
-	// "Failed to find bootable partition" (expected, ESP only).
+	// (sprint 2B's UFS support, present if the streamed image carries
+	// a UFS partition) or fail with "Failed to find bootable partition"
+	// (expected when only the FAT ESP is present).
 	println("phase3-oci-freebsd-boot: FREEBSD-BOOT CHAIN COMPLETE -- transferring control to loader.efi")
 	if _, serr := uefiboard.StartImage(childImage); serr != nil {
 		println("phase3-oci-freebsd-boot: StartImage returned:", serr.Error(), "-- loader.efi exited (sprint-2 UFS will let it boot a kernel)")

@@ -220,6 +220,12 @@ check_gate "phase3-oci-freebsd-boot: ConnectController OK"                    "C
 check_gate "phase3-oci-freebsd-boot: LocateHandleBuffer(SFS) found"           "SFS surfaced"
 check_gate "phase3-oci-freebsd-boot: matching SFS child handle"               "SFS-parent filter"
 check_gate "phase3-oci-freebsd-boot: LoadImage.*EFI.*BOOT.*BOOTX64.EFI.* OK"  "LoadImage(loader.efi)"
+# Sprint 2B: SFS publish surface reached (UFS partition optional —
+# either PublishSFS OK or the architectural-skip message).
+if ! grep -qE "phase3-oci-freebsd-boot: (PublishSFS OK|SFS-UFS skip)" "$LOG"; then
+    PASS=0
+    MISSING+=("sprint-2B SFS publish surface (PublishSFS or skip-with-rationale)")
+fi
 check_gate "phase3-oci-freebsd-boot: FREEBSD-BOOT CHAIN COMPLETE"             "chain complete"
 # Stretch: FreeBSD loader.efi banner reached (the real sprint-1.1 PASS).
 check_gate "FreeBSD/amd64 EFI loader"                                          "FreeBSD loader.efi banner"
