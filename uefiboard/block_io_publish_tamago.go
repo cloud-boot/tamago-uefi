@@ -178,12 +178,14 @@ func PublishBlockIO(image []byte) (uintptr, error) {
 		return 0, ErrNoBootServices
 	}
 
-	// Stable Go-owned copy of the image. The firmware will keep
-	// reading from `body` for the lifetime of the install via the
-	// trampolines (which look it up by `this`), so we MUST hold a
-	// typed reference (bodyKeepAlive below) to keep the GC away.
-	body := make([]byte, len(image))
-	copy(body, image)
+	// Sprint 2D' (2026-06-11): use the caller's slice DIRECTLY rather
+	// than allocating + copying. The caller (phase2_oci_freebsd_boot)
+	// already owns a stable buffer from the streaming pipeline, and
+	// the duplicate make+copy doubled transient memory pressure
+	// (240 MiB → OOM on TamaGo's 256 MiB heap for 64 MiB images). The
+	// bodyKeepAlive registry below holds a typed reference to keep the
+	// GC from collecting the caller's slice.
+	body := image
 
 	// Media struct — heap-allocated so the firmware can take its
 	// address and remember it via protocol.Media. UEFI 2.10 §13.9.1.4
