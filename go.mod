@@ -8,7 +8,7 @@ require (
 	github.com/go-filesystems/ufs v0.0.0
 	github.com/go-tpm2/common v0.1.0
 	github.com/go-tpm2/efitcg2 v0.1.1
-	github.com/go-tpm2/tpm2 v0.4.0
+	github.com/go-tpm2/tpm2 v0.5.0
 	github.com/go-virtio/common v0.1.5
 	github.com/go-virtio/console v0.1.0
 	github.com/go-virtio/gpu v0.0.0
@@ -40,13 +40,6 @@ replace github.com/usbarmory/tamago => ../../usbarmory/tamago
 replace github.com/go-filesystems/interface => ../../go-filesystems/interface
 
 replace github.com/go-filesystems/ufs => ../../go-filesystems/ufs
-
-// Measured boot (phase2_tpm_measure build tag) — local go-tpm2 clones.
-replace github.com/go-tpm2/common => ../../go-tpm2/common
-
-replace github.com/go-tpm2/efitcg2 => ../../go-tpm2/efitcg2
-
-replace github.com/go-tpm2/tpm2 => ../../go-tpm2/tpm2
 
 // Phase-3 DOOM bare-metal demo (phase3_oci_doom_boot tag) — local
 // godoom + go-virtio gpu / sound / input clones. Pinned to local paths
