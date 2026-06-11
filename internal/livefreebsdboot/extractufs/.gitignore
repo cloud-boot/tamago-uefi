@@ -1,0 +1,20 @@
+# Generated artifacts — rebuildable from install.sh + extract_ufs.sh +
+# minimize_fixture.sh. Documented in README.md.
+
+# Full UFS2 image dd'd from the FreeBSD release VM image (~5 GiB).
+freebsd-ufs2-full.img
+freebsd-ufs2-full.img.xz
+
+# Minimal fixture (symlink today, will become a real tiny UFS image
+# once sibling genufs lands).
+freebsd-ufs2-min.img
+freebsd-ufs2-min.img.xz
+
+# Exported /boot tree (host directory) and its tarball.
+/bootroot/
+/bootroot.tar
+
+# Verifier binaries — `go build` outputs we never ship.
+/verify/verify
+/verify/export_boot
+/verify/inspect_boot
