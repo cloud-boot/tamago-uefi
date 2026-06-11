@@ -2321,6 +2321,86 @@ tasks:
     cmds:
       - 'bash "{{.TASKFILE_DIR}}/internal/livefreebsdboot/run.sh" amd64'
 
+  # ---------------------------------------------------------------------
+  # Phase 3 sprint 3 — NetBSD + OpenBSD MVPs
+  # ---------------------------------------------------------------------
+  # Same Block IO + SFS + ConnectController + LoadImage chain as the
+  # FreeBSD MVP, just with the OS-specific OCI ref and EFI bootloader.
+  # NetBSD/OpenBSD modern releases use FFSv2/UFS2 which is on-disk
+  # compatible with go-filesystems/ufs — no driver gap to close in
+  # sprint 3. UFS-root + multi-user are sprint 3.x follow-ups.
+  netbsdboot:elf:amd64:
+    desc: 'Build app_amd64_netbsdboot.elf (TamaGo PIE, Phase 3 sprint 3 NetBSD probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase3_oci_netbsd_boot -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_netbsdboot.elf .'
+
+  netbsdboot:efi:amd64:
+    desc: 'Build Phase-3 sprint-3 BOOTX64-NETBSDBOOT.EFI (OCI streaming + BlockIO publish + ConnectController + LoadImage(NetBSD bootx64.efi)).'
+    deps: [netbsdboot:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-NETBSDBOOT.EFI" "{{.TASKFILE_DIR}}/app_amd64_netbsdboot.elf"'
+
+  netbsdboot:live:amd64:
+    desc: 'Phase-3 sprint-3 NetBSD MVP live smoke under QEMU+EDK2. Requires a local NetBSD ISO (CLOUDBOOT_NETBSD_IMAGE or default paths).'
+    deps: [netbsdboot:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livenetbsdboot/run.sh" amd64'
+
+  openbsdboot:elf:amd64:
+    desc: 'Build app_amd64_openbsdboot.elf (TamaGo PIE, Phase 3 sprint 3 OpenBSD probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase3_oci_openbsd_boot -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_openbsdboot.elf .'
+
+  openbsdboot:efi:amd64:
+    desc: 'Build Phase-3 sprint-3 BOOTX64-OPENBSDBOOT.EFI (OCI streaming + BlockIO publish + ConnectController + LoadImage(OpenBSD bootx64.efi)).'
+    deps: [openbsdboot:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-OPENBSDBOOT.EFI" "{{.TASKFILE_DIR}}/app_amd64_openbsdboot.elf"'
+
+  openbsdboot:live:amd64:
+    desc: 'Phase-3 sprint-3 OpenBSD MVP live smoke under QEMU+EDK2. Requires a local OpenBSD install ISO/img (CLOUDBOOT_OPENBSD_IMAGE or default paths).'
+    deps: [openbsdboot:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/liveopenbsdboot/run.sh" amd64'
+
+  windowsboot:elf:amd64:
+    desc: 'Build app_amd64_windowsboot.elf (TamaGo PIE, Phase 3 sprint 4 scaffolding probe).'
+    deps: [check-toolchain]
+    env:
+      GOOS: tamago
+      GOOSPKG: '{{.GOOSPKG}}'
+      GOARCH: amd64
+      CGO_ENABLED: '0'
+      GOWORK: 'off'
+    cmds:
+      - '{{.TAMAGO}}/bin/go build -tags {{.BUILD_TAGS}},phase2_pcienum,phase2_snpenum,phase2_blkprintk,phase3_oci_windows_boot -trimpath -buildmode=pie -ldflags "{{.LDFLAGS}}" -o app_amd64_windowsboot.elf .'
+
+  windowsboot:efi:amd64:
+    desc: 'Build Phase-3 sprint-4 BOOTX64-WINDOWSBOOT.EFI (scaffolding only — see phase3-multi-os-oci-boot.md sprint 4 section).'
+    deps: [windowsboot:elf:amd64]
+    cmds:
+      - 'cd "{{.PECTL_DIR}}" && go run . link-pie -o "{{.TASKFILE_DIR}}/BOOTX64-WINDOWSBOOT.EFI" "{{.TASKFILE_DIR}}/app_amd64_windowsboot.elf"'
+
+  windowsboot:live:amd64:
+    desc: 'Phase-3 sprint-4 Windows scaffolding smoke under QEMU+EDK2 (NO live boot — asserts gap-status gates).'
+    deps: [windowsboot:efi:amd64]
+    cmds:
+      - 'bash "{{.TASKFILE_DIR}}/internal/livewindowsboot/run.sh" amd64'
+
   # =====================================================================
   # VZ (Apple Virtualization.framework via vfkit) compatibility audit
   # =====================================================================
@@ -2432,6 +2512,7 @@ tasks:
       - rm -f app_amd64_dhcpocimenu.elf app_arm64_dhcpocimenu.elf app_riscv64_dhcpocimenu.elf app_loong64_dhcpocimenu.elf
       - rm -f BOOTX64-DHCPOCIMENU.EFI BOOTAA64-DHCPOCIMENU.EFI BOOTRISCV64-DHCPOCIMENU.EFI BOOTLOONGARCH64-DHCPOCIMENU.EFI
       - rm -f app_amd64_freebsdboot.elf BOOTX64-FREEBSDBOOT.EFI
+      - rm -f app_amd64_windowsboot.elf BOOTX64-WINDOWSBOOT.EFI
       - rm -f BOOTX64-CHAINED.EFI BOOTAA64-CHAINED.EFI BOOTRISCV64-CHAINED.EFI BOOTLOONGARCH64-CHAINED.EFI
       - rm -f BOOTX64-EFIHANDOVER.EFI BOOTAA64-EFIHANDOVER.EFI BOOTRISCV64-EFIHANDOVER.EFI BOOTLOONGARCH64-EFIHANDOVER.EFI
       - rm -f internal/embed_chained/chained_amd64.efi internal/embed_chained/chained_arm64.efi internal/embed_chained/chained_riscv64.efi internal/embed_chained/chained_loong64.efi
