@@ -3,11 +3,18 @@ module github.com/cloud-boot/tamago-uefi
 go 1.26.3
 
 require (
+	github.com/cloud-boot/godoom v0.0.0
 	github.com/go-filesystems/interface v0.0.0
 	github.com/go-filesystems/ufs v0.0.0
-	github.com/go-virtio/common v0.1.4
+	github.com/go-tpm2/common v0.1.0
+	github.com/go-tpm2/efitcg2 v0.1.1
+	github.com/go-tpm2/tpm2 v0.4.0
+	github.com/go-virtio/common v0.1.5
 	github.com/go-virtio/console v0.1.0
+	github.com/go-virtio/gpu v0.0.0
+	github.com/go-virtio/input v0.0.0
 	github.com/go-virtio/net v0.1.0
+	github.com/go-virtio/sound v0.0.0
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
@@ -33,3 +40,23 @@ replace github.com/usbarmory/tamago => ../../usbarmory/tamago
 replace github.com/go-filesystems/interface => ../../go-filesystems/interface
 
 replace github.com/go-filesystems/ufs => ../../go-filesystems/ufs
+
+// Measured boot (phase2_tpm_measure build tag) — local go-tpm2 clones.
+replace github.com/go-tpm2/common => ../../go-tpm2/common
+
+replace github.com/go-tpm2/efitcg2 => ../../go-tpm2/efitcg2
+
+replace github.com/go-tpm2/tpm2 => ../../go-tpm2/tpm2
+
+// Phase-3 DOOM bare-metal demo (phase3_oci_doom_boot tag) — local
+// godoom + go-virtio gpu / sound / input clones. Pinned to local paths
+// so the bring-up sprint can iterate without tagged releases.
+replace github.com/cloud-boot/godoom => ../godoom
+
+replace github.com/go-virtio/common => ../../go-virtio/common
+
+replace github.com/go-virtio/gpu => ../../go-virtio/gpu
+
+replace github.com/go-virtio/input => ../../go-virtio/input
+
+replace github.com/go-virtio/sound => ../../go-virtio/sound

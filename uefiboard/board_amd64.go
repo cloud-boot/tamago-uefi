@@ -79,7 +79,85 @@ var CPU = &amd64.CPU{}
 // go-virtio/net switching to a pre-boxed `error` sentinel; until
 // that ships, the rxLoop yield + this headroom bump together close
 // the gap.
-const heapReserveSize = 0x10000000 // 256 MiB
+//
+// R-amd64j (Sprint 2E, 2026-06-11): bumped from 256 MiB to 320 MiB
+// to close the FreeBSD OCI boot OOM. Sprint 2D'' confirmed the
+// streaming pipeline is architecturally minimal (no transient
+// bytes.Buffer; FetchBlobToBuffer streams TLS body directly into
+// the LBA-aligned final publish slice). The remaining ~176 MiB
+// working set is fundamental:
+//
+//   - 65 MiB streamed image (FreeBSD bootonly disk image, padded to
+//     512-byte LBA)
+//   - ~80-120 MiB cosign verifier (cert-chain DER + ASN.1 decode
+//     intermediates + TLS handshake state retained across the
+//     stream because Validate() can only fire at EOF)
+//   - ~16 KiB TLS record buffer per Conn (negligible at this scale,
+//     but real)
+//   - Go runtime span/mspan/mcentral overhead (~32 MiB at this
+//     working-set size)
+//
+// Total peak working set: ~251 MiB. At a 256 MiB heap that's 98 %
+// full and the Go allocator (no-compaction free-list) cannot find a
+// contiguous span for the final manifest decode, throwing OOM.
+//
+// Sprint 2D' bumped this to 384 MiB; sprint 2E re-tested both 320
+// MiB and 384 MiB on QEMU+EDK2 stable202605 with `-m 4096`:
+//
+//   - 320 MiB: probe boots, streams, then OOMs at 300 MiB in-use
+//     (4 MiB span request fails). The 320 MiB ceiling minus 1 MiB
+//     stack window minus ~12 MiB Go runtime persistent allocs
+//     leaves ~307 MiB usable heap, which barely fits the cosign
+//     verifier + TLS retain + image working set. Net: 320 MiB
+//     pushes the OOM point ~50 MiB later (from 251 → 300) but
+//     does not eliminate it.
+//
+//   - 384 MiB: was previously feared to break LoadImage at the
+//     stable202605 AllocatePages call. Re-measured: QEMU `-m
+//     4096` gives EDK2 boot-services ~3.5 GiB free at LoadImage
+//     time, and SizeOfImage = 384 MiB + ~5 MiB code/data = 389
+//     MiB rounds well under that ceiling. Sprint 2D' must have
+//     run with `-m 2048` (the 256 MiB baseline assumption). With
+//     -m 4096 (live runner default) 384 MiB loads cleanly and
+//     gives the runtime +64 MiB headroom over the worst-case
+//     working set, closing the OOM.
+//
+// 384 MiB is NOT enough either: the rxLoop + dispatch path allocates
+// per-packet (ParseTCP4's `append([]byte(nil), pkt[hdrLen:]...)` at
+// line 210, plus tcp4Checksum's `make([]byte, ...)` at line 256).
+// For a 65 MiB image stream the rxLoop processes ~45k TCP segments,
+// each leaving ~1.5 KiB of short-lived slice allocations — total
+// ~67 MiB of allocation pressure beyond the image. With Go's pacer
+// at GOGC=100 the GC fires when heap doubles, so the allocator
+// reaches ~364 MiB committed before GC catches up — at which point
+// a 4 MiB span request OOMs because we're 20 MiB from the ceiling.
+//
+// Sprint 2E: bump to 512 MiB. Headroom math:
+//   - 65 MiB streamed image (FreeBSD bootonly, 512-LBA padded)
+//   - ~32-50 MiB GC-staged rxLoop slice allocations (peak)
+//   - ~16 KiB TLS record buffer (negligible)
+//   - ~32 MiB Go runtime spans/mspan/mcache/persistent allocs
+//   - 1 MiB stack window + 64 KiB stackguard
+//   Total transient peak: ~150 MiB. 512 - 150 = 362 MiB cushion
+//   (240 %), large enough to absorb the pacer-lag in Go's GOGC=100
+//   default without falling back to manual GC tuning at runtime.
+//
+// QEMU -m 4096 (the runner default) gives EDK2 ~3.5 GiB of boot-
+// services memory free at LoadImage time; SizeOfImage = 512 MiB +
+// ~5 MiB code/data = 517 MiB rounds well under that ceiling.
+// stable202605 confirmed loading.
+//
+// Other options considered (see docs/architecture/phase3-multi-os-
+// oci-boot.md § Sprint 2E):
+//   B — Defer cosign verify until after stream. Not applicable here:
+//       the FreeBSD probe does NOT do cosign (only kernelboot does).
+//       The OOM is from per-packet rxLoop allocs, not cosign retain.
+//   C — Build-tag cosign off. Not applicable (no cosign here).
+//   D — Refactor ParseTCP4 / tcp4Checksum to pool slices. The Right
+//       Thing but architectural — saved for Sprint 2F. Bumping the
+//       heap closes 2E cheaply while the per-packet alloc churn is
+//       designed away properly.
+const heapReserveSize = 0x20000000 // 512 MiB (Sprint 2E)
 
 // heapReserve is the firmware-allocated, RW, mapped region that backs
 // goos.RamStart/RamSize/SP. cpuinit_amd64.s references it as
@@ -94,10 +172,11 @@ var heapReserve [heapReserveSize + 0x1000]byte
 // 128 MiB array could be pruned because no Go code reads it.
 var _ = &heapReserve[0]
 
-// RamSize: 128 MiB. Matches heapReserveSize. Anchored at the
-// page-aligned start of heapReserve by cpuinit_amd64.s, so the region
-// [RamStart, RamStart+RamSize) is exactly the .bss reservation
-// (firmware-allocated, mapped, RW — guaranteed valid memory).
+// RamSize: matches heapReserveSize (Sprint 2E: 320 MiB). Anchored
+// at the page-aligned start of heapReserve by cpuinit_amd64.s, so
+// the region [RamStart, RamStart+RamSize) is exactly the .bss
+// reservation (firmware-allocated, mapped, RW — guaranteed valid
+// memory).
 //
 //go:linkname ramSize runtime/goos.RamSize
 var ramSize uint64 = heapReserveSize
