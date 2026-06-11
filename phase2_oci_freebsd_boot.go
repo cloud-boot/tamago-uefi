@@ -166,7 +166,12 @@ func runOCIFreeBSDBootProbe() {
 		return
 	}
 
+	// Pre-grow the buffer so bytes.Buffer doesn't double its way through
+	// 64 MiB → 128 MiB → 256 MiB intermediate allocations, which OOMs
+	// tamago's 256 MiB heap reservation. With Grow(N) the underlying
+	// slice is allocated exactly once at len ≈ N.
 	var buf bytes.Buffer
+	buf.Grow(int(target.Size))
 	startNS := time.Now().UnixNano()
 	n, ferr := reg.FetchBlobStream(target, &buf)
 	elapsedMS := (time.Now().UnixNano() - startNS) / 1_000_000

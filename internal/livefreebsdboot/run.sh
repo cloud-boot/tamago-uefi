@@ -1,8 +1,19 @@
 #!/usr/bin/env bash
-# Phase-3 sprint-1 live smoke under QEMU+EDK2.
-# Sprint 1 is amd64-only — the EFI_BLOCK_IO_PROTOCOL publish-side
-# trampolines + sprint-1 probe gate on amd64 alone. arm64/riscv64/
-# loong64 ports are deferred to sprint 2.
+# Phase-3 live FreeBSD-boot smoke under QEMU+EDK2 (sprint-1 → sprint-
+# 2C-Integration). amd64-only — EFI_BLOCK_IO_PROTOCOL publish-side
+# trampolines validated on amd64 alone; arm64/riscv64/loong64 ports
+# tracked in sprint 1.3 / 2E.
+#
+# Sprint 2C-Integration (this revision):
+#   - buildespimg now lays down a 2-partition disk: FAT16 ESP +
+#     FreeBSD-UFS, the latter populated via go-filesystems/ufs.Mkfs
+#     from extractufs/bootroot.tar.
+#   - SFS publish trampoline (sprint 2B) now finds a real UFS
+#     partition, parses it via go-filesystems/ufs, publishes an SFS
+#     on a synthetic handle; FreeBSD loader.efi enumerates /boot and
+#     reads /boot/loader.conf from our SFS-UFS surface.
+#   - Kernel load is the next boundary (sprint 2D scope — see
+#     phase3-multi-os-oci-boot.md).
 #
 #     bash internal/livefreebsdboot/run.sh amd64
 #
@@ -88,16 +99,22 @@ echo "[live-freebsdboot:$ARCH] FreeBSD source image: $SRC_PATH" >&2
 WORK_PRE="$(mktemp -d -t cloudboot-freebsd-pre-XXXXXX)"
 trap 'rm -rf "$WORK_PRE"' EXIT
 
-# 1a) Mint a minimal ESP-only disk image:
-#       PMBR + GPT + single 16 MiB FAT16 partition
-#       contents: \EFI\BOOT\BOOTX64.EFI = FreeBSD loader.efi
+# 1a) Mint a bootable disk image:
+#       PMBR + GPT + FAT16 ESP partition (+ optional FreeBSD-UFS partition)
+#       ESP contents: \EFI\BOOT\BOOTX64.EFI = FreeBSD loader.efi
+#       UFS contents (if extractufs/bootroot.tar exists): a freshly-minted
+#       UFS2 filesystem populated with /boot/{loader.conf, kernel/*.ko, ...}
+#       — gates the SFS-UFS publish surface end-to-end and expects
+#       FreeBSD-loader.efi to find the kernel via our UFS SFS.
 #
 #     - xorriso pulls /boot/loader.efi from the FreeBSD source ISO.
 #     - mformat (mtools) makes the 16 MiB FAT16 image. NB: 16 MiB +
 #       no `-F` makes mtools pick FAT16. Empirically OVMF stable202605
 #       did NOT load FreeBSD's loader.efi off a 32 MiB FAT32 ESP
 #       (BdsDxe "Not Found"); FAT16 worked first try.
-#     - buildespimg (Go helper in this dir) wraps the FAT in PMBR + GPT.
+#     - buildespimg (Go helper in this dir) wraps the FAT in PMBR + GPT
+#       and, when -ufs is passed, appends a 2nd FreeBSD-UFS partition.
+BOOTROOT_TAR="$REPO_DIR/internal/livefreebsdboot/extractufs/bootroot.tar"
 IMG_PATH="$WORK_PRE/disk.img"
 if [[ "${CLOUDBOOT_FREEBSD_DISK_PREBUILT:-}" == "1" && -f "${CLOUDBOOT_FREEBSD_DISK:-}" ]]; then
     IMG_PATH="$CLOUDBOOT_FREEBSD_DISK"
@@ -113,10 +130,38 @@ else
     mmd -i "$WORK_PRE/fat.img" ::/EFI ::/EFI/BOOT >&2
     mcopy -i "$WORK_PRE/fat.img" "$WORK_PRE/loader.efi" ::/EFI/BOOT/BOOTX64.EFI >&2
 
-    echo "[live-freebsdboot:$ARCH] wrapping FAT in PMBR + GPT via buildespimg" >&2
+    UFS_FLAGS=()
+    if [[ -f "$BOOTROOT_TAR" ]]; then
+        echo "[live-freebsdboot:$ARCH] sprint 2C-Integration: appending FreeBSD-UFS partition from $BOOTROOT_TAR" >&2
+        UFS_FLAGS=( -ufs "$BOOTROOT_TAR" )
+    else
+        echo "[live-freebsdboot:$ARCH] (diagnostic) extractufs/bootroot.tar not present — falling back to FAT16-only path; sprint-2C-Integration SFS-UFS gate will architectural-skip" >&2
+    fi
+    echo "[live-freebsdboot:$ARCH] wrapping FAT (+UFS) in PMBR + GPT via buildespimg" >&2
     (cd "$REPO_DIR/internal/livefreebsdboot/buildespimg" && \
-        GOWORK=off go run . -fat "$WORK_PRE/fat.img" -out "$IMG_PATH") >&2
+        GOWORK=off go run . -fat "$WORK_PRE/fat.img" "${UFS_FLAGS[@]}" -out "$IMG_PATH") >&2
     [[ -f "$IMG_PATH" ]] || { echo "[live-freebsdboot] buildespimg failed to produce $IMG_PATH" >&2; exit 1; }
+
+    # 1b) Cross-validate the UFS partition slice via the pinned
+    # go-filesystems/ufs read-only verifier (extractufs/verify). This
+    # catches regressions where buildespimg's UFS layout silently
+    # diverges from what the read driver accepts. We extract the UFS
+    # slice via the partition entry's start LBA + sector count.
+    if [[ -f "$BOOTROOT_TAR" ]]; then
+        echo "[live-freebsdboot:$ARCH] cross-validating UFS partition via extractufs/verify" >&2
+        # Parse the second GPT entry (offset 1024 + 128 = LBA 2 +
+        # entry-1 = byte 2*512+128 = 1152). StartingLBA at +32,
+        # EndingLBA at +40.
+        UFS_START_LBA=$(od -An -tu8 -N8 -j 1184 "$IMG_PATH" | tr -d ' ')
+        UFS_END_LBA=$(od -An -tu8 -N8 -j 1192 "$IMG_PATH" | tr -d ' ')
+        UFS_SECTORS=$(( UFS_END_LBA - UFS_START_LBA + 1 ))
+        echo "[live-freebsdboot:$ARCH] UFS partition: LBA $UFS_START_LBA..$UFS_END_LBA ($UFS_SECTORS sectors)" >&2
+        dd if="$IMG_PATH" of="$WORK_PRE/ufs-part.img" bs=512 skip="$UFS_START_LBA" count="$UFS_SECTORS" status=none
+        (cd "$REPO_DIR/internal/livefreebsdboot/extractufs/verify" && \
+            GOWORK=off go run . -img "$WORK_PRE/ufs-part.img" \
+                -require-kernel=false -require-loader-conf=true) >&2 || \
+            { echo "[live-freebsdboot] FATAL: buildespimg's UFS partition fails extractufs/verify cross-check" >&2; exit 1; }
+    fi
 fi
 echo "[live-freebsdboot:$ARCH] disk image ready: $IMG_PATH ($(stat -f %z "$IMG_PATH" 2>/dev/null || stat -c %s "$IMG_PATH") bytes)" >&2
 
@@ -220,15 +265,30 @@ check_gate "phase3-oci-freebsd-boot: ConnectController OK"                    "C
 check_gate "phase3-oci-freebsd-boot: LocateHandleBuffer(SFS) found"           "SFS surfaced"
 check_gate "phase3-oci-freebsd-boot: matching SFS child handle"               "SFS-parent filter"
 check_gate "phase3-oci-freebsd-boot: LoadImage.*EFI.*BOOT.*BOOTX64.EFI.* OK"  "LoadImage(loader.efi)"
-# Sprint 2B: SFS publish surface reached (UFS partition optional —
-# either PublishSFS OK or the architectural-skip message).
-if ! grep -qE "phase3-oci-freebsd-boot: (PublishSFS OK|SFS-UFS skip)" "$LOG"; then
-    PASS=0
-    MISSING+=("sprint-2B SFS publish surface (PublishSFS or skip-with-rationale)")
+# Sprint 2C-Integration: SFS publish surface MUST be PublishSFS OK
+# (UFS partition present from buildespimg -ufs). The architectural-skip
+# is only acceptable when bootroot.tar is absent.
+if [[ -f "$BOOTROOT_TAR" ]]; then
+    check_gate "phase3-oci-freebsd-boot: PublishSFS OK"  "PublishSFS OK (sprint 2C-Integration)"
+else
+    if ! grep -qE "phase3-oci-freebsd-boot: (PublishSFS OK|SFS-UFS skip)" "$LOG"; then
+        PASS=0
+        MISSING+=("sprint-2B SFS publish surface (PublishSFS or skip-with-rationale)")
+    fi
 fi
 check_gate "phase3-oci-freebsd-boot: FREEBSD-BOOT CHAIN COMPLETE"             "chain complete"
 # Stretch: FreeBSD loader.efi banner reached (the real sprint-1.1 PASS).
 check_gate "FreeBSD/amd64 EFI loader"                                          "FreeBSD loader.efi banner"
+
+# Sprint 2C-Integration PASS: kernel banner / mountroot / init reached.
+# The kernel itself is currently absent from buildespimg's UFS partition
+# (29 MiB > sprint-2C-A writer cap of 2 MiB; sprint 2D extends Mkfs to
+# bsize=32768 + double-indirect). So loader.efi will reach our SFS,
+# enumerate /boot, find loader.conf, and then fail at kernel load.
+# That fail point IS the new boundary documented for sprint 2D.
+if grep -qE "Welcome to FreeBSD|FreeBSD/amd64 \(|^init:|mountroot>|Trying to mount root from" "$LOG"; then
+    echo "[live-freebsdboot:$ARCH] BONUS: kernel-boot evidence in log" >&2
+fi
 
 if [[ "$PASS" -eq 1 ]]; then
     echo "[live-freebsdboot:$ARCH] PASS — wall=${ELAPSED_MS}ms, ref=$OCI_REF"

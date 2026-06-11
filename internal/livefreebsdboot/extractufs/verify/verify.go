@@ -26,6 +26,8 @@ import (
 
 func main() {
 	path := flag.String("img", "freebsd-ufs2-full.img", "path to extracted UFS2 image")
+	requireKernel := flag.Bool("require-kernel", true, "require /boot/kernel/kernel to be a present regular file; turn OFF when verifying sprint-2C-Integration UFS partitions where the kernel exceeds the writer's single-indirect cap (sprint 2D will lift it)")
+	requireLoaderConf := flag.Bool("require-loader-conf", false, "require /boot/loader.conf to be a present regular file (true in integration mode where buildespimg embeds the synthetic loader.conf)")
 	flag.Parse()
 
 	fs, err := ufs.OpenFile(*path)
@@ -51,24 +53,32 @@ func main() {
 		}
 	}
 	if !foundKernel {
-		fmt.Fprintln(os.Stderr, "/boot/kernel/kernel NOT FOUND in directory listing")
-		os.Exit(3)
+		if *requireKernel {
+			fmt.Fprintln(os.Stderr, "/boot/kernel/kernel NOT FOUND in directory listing")
+			os.Exit(3)
+		}
+		fmt.Println("/boot/kernel/kernel: ABSENT (expected in sprint-2C-Integration; deferred to sprint 2D)")
+	} else {
+		st, err := fs.Stat("/boot/kernel/kernel")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Stat /boot/kernel/kernel: %v\n", err)
+			os.Exit(4)
+		}
+		fmt.Printf("/boot/kernel/kernel: size=%d bytes mode=0%o\n", st.Size(), st.Mode())
 	}
 
-	st, err := fs.Stat("/boot/kernel/kernel")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Stat /boot/kernel/kernel: %v\n", err)
-		os.Exit(4)
-	}
-	fmt.Printf("/boot/kernel/kernel: size=%d bytes mode=0%o\n", st.Size(), st.Mode())
-
-	// /boot/loader.conf is optional but worth reporting.
+	// /boot/loader.conf: optional in extract mode, required in
+	// integration mode (the synthetic loader.conf is bootstrap-critical
+	// for the live boot path).
 	if data, err := fs.ReadFile("/boot/loader.conf"); err == nil {
 		line := strings.SplitN(string(data), "\n", 2)[0]
 		fmt.Printf("/boot/loader.conf: %d bytes; first line: %q\n", len(data), line)
+	} else if *requireLoaderConf {
+		fmt.Fprintf(os.Stderr, "/boot/loader.conf MISSING: %v\n", err)
+		os.Exit(5)
 	} else {
 		fmt.Printf("/boot/loader.conf: not present (%v) — fine for fixture\n", err)
 	}
 
-	fmt.Println("OK — go-filesystems/ufs successfully read the extracted partition")
+	fmt.Println("OK — go-filesystems/ufs successfully read the partition")
 }
