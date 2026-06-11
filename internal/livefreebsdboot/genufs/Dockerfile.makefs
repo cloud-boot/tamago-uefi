@@ -1,0 +1,61 @@
+# Copyright 2026 The cloud-boot Authors.
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# Dockerfile.makefs — Linux container that bundles the FreeBSD-style
+# makefs(8) tool, built from kusumi/makefs (a portable C port of
+# FreeBSD's makefs to Linux/*BSD).
+#
+# Why not Debian's `makefs` apt package? That package ships NetBSD's
+# makefs 20190105 which writes its UFS2 superblock at byte 8192 (the
+# NetBSD-flavored SBLOCK_UFS2). FreeBSD's loader.efi + our
+# go-filesystems/ufs reader expect the FreeBSD-flavored SBLOCK_UFS2
+# at byte 65536. The two on-disk layouts are otherwise identical.
+#
+# The kusumi/makefs port preserves FreeBSD's offset (65536) so the
+# resulting image is bit-compatible with what newfs(8) on real
+# FreeBSD would produce.
+#
+# Build:
+#
+#   docker build -t cloudboot/makefs:freebsd \
+#       -f internal/livefreebsdboot/genufs/Dockerfile.makefs .
+#
+# Use:
+#
+#   docker run --rm -v ${stage}:/stage:ro -v ${out}:/out \
+#       cloudboot/makefs:freebsd \
+#       makefs -t ffs -o version=2,label=rootfs -s 64m \
+#       /out/ufs2-fresh.img /stage
+#
+# Image size is ~80 MiB (debian:bookworm-slim + makefs binary + a
+# few runtime libs).
+#
+# Pinning: we deliberately do NOT pin kusumi/makefs to a commit
+# SHA in this Dockerfile because (a) the upstream repo is stable
+# (FreeBSD makefs is mature) and (b) the cloud-boot live test
+# treats the resulting UFS2 as the oracle that go-filesystems/ufs
+# must read — if a new kusumi/makefs version drifts the on-disk
+# bytes, the live test fails loudly and we re-pin then.
+
+FROM debian:bookworm-slim AS build
+
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential ca-certificates curl uuid-dev libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN curl -sL https://github.com/kusumi/makefs/archive/refs/heads/master.tar.gz \
+        | tar -xz --strip-components=1
+RUN make USE_HAMMER2=0 USE_EXFAT=0
+
+FROM debian:bookworm-slim
+
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        libuuid1 libssl3 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /build/src/usr.sbin/makefs/makefs /usr/local/sbin/makefs
+
+ENTRYPOINT ["/usr/local/sbin/makefs"]

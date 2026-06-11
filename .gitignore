@@ -14,3 +14,8 @@ startup.nsh
 /cmd/blkprintk-recover/blkprintk-recover
 /blkprintk-seed
 /blkprintk-recover
+# Phase-3 sprint-2C genufs outputs — image is ~64 MiB and is rebuildable
+# via `bash internal/livefreebsdboot/genufs/genufs.sh` (see that dir's README).
+ufs2-fresh.img
+*.ufs.img
+/internal/livefreebsdboot/genufs/verify/verify
