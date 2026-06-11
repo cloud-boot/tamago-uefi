@@ -43,7 +43,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"runtime"
 	"time"
@@ -166,24 +165,46 @@ func runOCIFreeBSDBootProbe() {
 		return
 	}
 
-	// Pre-grow the buffer so bytes.Buffer doesn't double its way through
-	// 64 MiB → 128 MiB → 256 MiB intermediate allocations, which OOMs
-	// tamago's 256 MiB heap reservation. With Grow(N) the underlying
-	// slice is allocated exactly once at len ≈ N.
-	var buf bytes.Buffer
-	buf.Grow(int(target.Size))
+	// Sprint 2D'': stream OCI bytes directly into the final publish
+	// buffer. We pre-allocate exactly `target.Size + tailpad`, where
+	// `tailpad` is the padding required to round `target.Size` up to
+	// the BlockIO 512-byte LBA quantum. FetchBlobToBuffer fills the
+	// first `target.Size` bytes in place; the tail-pad region is
+	// already zeroed by `make` so no second allocation is needed for
+	// LBA alignment.
+	//
+	// vs sprint 2D' (which used bytes.Buffer.Grow + buf.Bytes()):
+	//
+	//   - 2D': bytes.Buffer reserves N bytes for growth; once filled,
+	//     `imageBytes := buf.Bytes()` returns a slice ALIASING the
+	//     buffer. The downstream `imageBytes = append(imageBytes, pad...)`
+	//     then often forces a second N-byte allocation (the Buffer
+	//     used Grow(N) exactly, capacity == len, so any further append
+	//     reallocs). 240 MiB working set + 64 MiB second alloc = OOM.
+	//
+	//   - 2D'': ONE slice allocated up-front at exactly
+	//     `roundUp512(target.Size)`. FetchBlobToBuffer writes the
+	//     decoded body into the first `n` bytes via a no-alloc
+	//     io.Writer (fixedSliceWriter). No transient bytes.Buffer.
+	//     No buf.Bytes() alias. No tail-pad reallocation.
+	tailPad := 0
+	if rem := int(target.Size) % int(uefiboard.BlockIOLogicalBlockSize); rem != 0 {
+		tailPad = int(uefiboard.BlockIOLogicalBlockSize) - rem
+	}
+	imageBytes := make([]byte, int(target.Size)+tailPad)
 	startNS := time.Now().UnixNano()
-	n, ferr := reg.FetchBlobStream(target, &buf)
+	n, ferr := reg.FetchBlobToBuffer(target, imageBytes[:int(target.Size)])
 	elapsedMS := (time.Now().UnixNano() - startNS) / 1_000_000
 	if ferr != nil {
-		println("phase3-oci-freebsd-boot: FREEBSD-BOOT FAIL: FetchBlobStream:", ferr.Error())
+		println("phase3-oci-freebsd-boot: FREEBSD-BOOT FAIL: FetchBlobToBuffer:", ferr.Error())
 		println("phase3-oci-freebsd-boot: bytes-written-before-error =", int(n))
 		return
 	}
 	println("phase3-oci-freebsd-boot: streamed", int(n), "bytes; SHA-256 verified OK")
 	println("phase3-oci-freebsd-boot: streaming elapsed (ms) =", int(elapsedMS))
-
-	imageBytes := buf.Bytes()
+	if tailPad > 0 {
+		println("phase3-oci-freebsd-boot: pre-padded image tail by", tailPad, "bytes for 512-aligned LastBlock")
+	}
 	// Sanity: protective MBR signature at offset 510..511.
 	if len(imageBytes) < 512 || imageBytes[510] != 0x55 || imageBytes[511] != 0xAA {
 		println("phase3-oci-freebsd-boot: FREEBSD-BOOT FAIL: streamed image missing MBR signature")
@@ -197,15 +218,6 @@ func runOCIFreeBSDBootProbe() {
 		return
 	}
 	println("phase3-oci-freebsd-boot: streamed image header OK (MBR 0x55AA + GPT 'EFI PART')")
-
-	// Pad image to a 512-byte multiple if the tail is short. UEFI's
-	// PartitionDxe + FatDxe both walk fixed 512-byte LBAs and our
-	// publisher refuses misaligned images.
-	if rem := len(imageBytes) % int(uefiboard.BlockIOLogicalBlockSize); rem != 0 {
-		pad := make([]byte, int(uefiboard.BlockIOLogicalBlockSize)-rem)
-		imageBytes = append(imageBytes, pad...)
-		println("phase3-oci-freebsd-boot: padded image tail by", len(pad), "bytes for 512-aligned LastBlock")
-	}
 
 	blkHandle, perr := uefiboard.PublishBlockIO(imageBytes)
 	if perr != nil {

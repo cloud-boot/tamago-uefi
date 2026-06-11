@@ -29,6 +29,7 @@ package oci
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -199,6 +200,135 @@ func (reg *Registry) FetchBlobStream(desc Descriptor, dst io.Writer) (int64, err
 	for hop := 0; hop <= maxBlobRedirects; hop++ {
 		h := sha256.New()
 		mw := io.MultiWriter(dst, h)
+
+		opts := ministack.HTTPGetOptions{
+			DNSServer:      reg.DNS,
+			DialTimeout:    reg.DialTimeout,
+			RequestTimeout: reg.RequestTimeout,
+		}
+		if bearer != "" {
+			opts.ExtraHeaders = append(opts.ExtraHeaders, "Authorization: Bearer "+bearer)
+		}
+
+		status, n, headers, herr := st.GetStream(url, mw, opts)
+		if herr != nil {
+			return n, herr
+		}
+		if isRedirect(status) {
+			loc := headers["location"]
+			if loc == "" {
+				return 0, &ErrRegistryStatus{URL: url, Status: status}
+			}
+			url = loc
+			bearer = ""
+			continue
+		}
+		if status != 200 {
+			return n, &ErrRegistryStatus{URL: url, Status: status}
+		}
+		if desc.Size > 0 && n != desc.Size {
+			return n, fmt.Errorf("ministack/oci: blob size mismatch: got %d want %d", n, desc.Size)
+		}
+		_, wantHex, _ := ParseDigest(desc.Digest)
+		gotHex := hex.EncodeToString(h.Sum(nil))
+		if !strings.EqualFold(gotHex, wantHex) {
+			return n, ErrDigestMismatch
+		}
+		return n, nil
+	}
+	return 0, fmt.Errorf("ministack/oci: too many redirects (>%d) for %s", maxBlobRedirects, desc.Digest)
+}
+
+// ErrBlobBufferTooSmall is returned by FetchBlobToBuffer when the
+// caller-supplied slice is shorter than desc.Size.
+var ErrBlobBufferTooSmall = errors.New("ministack/oci: caller buffer shorter than descriptor size")
+
+// ErrBlobBufferOverflow is returned by FetchBlobToBuffer if the
+// transport delivers more bytes than the caller-supplied slice can
+// hold. This protects against a registry returning a body larger than
+// the descriptor's declared Size.
+var ErrBlobBufferOverflow = errors.New("ministack/oci: blob exceeds caller buffer")
+
+// fixedSliceWriter is an io.Writer that fills a caller-owned []byte at
+// a running offset. It does NOT allocate. Writing past the slice end
+// returns ErrBlobBufferOverflow. Used by FetchBlobToBuffer to stream
+// chunks directly into the final destination — no bytes.Buffer
+// transient, no growth, no copy.
+type fixedSliceWriter struct {
+	buf []byte
+	off int
+}
+
+// Write implements io.Writer. Returns the number of bytes copied. If
+// the input would exceed the slice it copies as much as fits, then
+// returns ErrBlobBufferOverflow so the streaming-transport loop fails
+// closed.
+func (w *fixedSliceWriter) Write(p []byte) (int, error) {
+	if w.off >= len(w.buf) {
+		if len(p) == 0 {
+			return 0, nil
+		}
+		return 0, ErrBlobBufferOverflow
+	}
+	n := copy(w.buf[w.off:], p)
+	w.off += n
+	if n < len(p) {
+		return n, ErrBlobBufferOverflow
+	}
+	return n, nil
+}
+
+// FetchBlobToBuffer streams a single blob descriptor through the
+// Registry's streaming transport, writing directly into the caller-
+// supplied []byte at offset 0. The slice MUST be at least desc.Size
+// bytes long. As bytes arrive they are tee'd through a SHA-256 hasher
+// and copied into `dst`; on EOF the computed digest is verified
+// against desc.Digest. On mismatch ErrDigestMismatch is returned and
+// the caller is expected to discard whatever is in `dst`.
+//
+// Why this exists alongside FetchBlobStream:
+//
+// FetchBlobStream takes an io.Writer, which the natural callers back
+// with bytes.Buffer{}.Grow(N). bytes.Buffer reserves N bytes for
+// growth, but when the caller then calls .Bytes() the underlying
+// slice is shared with the buffer's internal cursor — and any further
+// padding/growth performed by the caller (e.g. tail-pad to a 512-byte
+// LBA multiple via append) may allocate a SECOND N-byte slice if
+// capacity isn't sufficient. On tamago's 256 MiB heap with a 64 MiB
+// disk image, that doubling forces an OOM.
+//
+// FetchBlobToBuffer avoids this entirely: the caller allocates exactly
+// one slice of `target.Size`, hands it in, and the stream fills it in
+// place. The publish-side BlockIO then references that same slice via
+// bodyKeepAlive (R-amd64j Phase 1 pattern), so the entire image
+// pipeline lives in ONE 64 MiB allocation.
+//
+// Returns the number of bytes successfully written. On error the
+// returned count is the bytes already deposited into `dst` — caller
+// owns the slice and is responsible for discarding it on error.
+//
+// Unlike FetchBlob, this method does NOT cap the response size at the
+// registry-side limit; the cap is the slice length itself. A registry
+// returning more bytes than `dst` can hold fails closed with
+// ErrBlobBufferOverflow.
+func (reg *Registry) FetchBlobToBuffer(desc Descriptor, dst []byte) (int64, error) {
+	if _, _, err := ParseDigest(desc.Digest); err != nil {
+		return 0, err
+	}
+	if desc.Size > 0 && int64(len(dst)) < desc.Size {
+		return 0, ErrBlobBufferTooSmall
+	}
+	st, ok := reg.Transport.(StreamTransport)
+	if !ok {
+		return 0, ErrTransportNotStreaming
+	}
+
+	url := reg.Ref.blobURL(desc.Digest)
+	bearer := reg.bearer
+	for hop := 0; hop <= maxBlobRedirects; hop++ {
+		h := sha256.New()
+		w := &fixedSliceWriter{buf: dst}
+		mw := io.MultiWriter(w, h)
 
 		opts := ministack.HTTPGetOptions{
 			DNSServer:      reg.DNS,
