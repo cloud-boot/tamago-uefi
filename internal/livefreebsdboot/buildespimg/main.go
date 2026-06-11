@@ -73,15 +73,17 @@ const (
 
 	// UFS partition sizing knobs. The smoke runner streams the whole
 	// disk image into a single Go []byte inside tamago's 256 MiB heap
-	// (plus oras's HTTPS working set), so the disk image MUST stay
-	// well under ~80 MiB to leave room for the rest of the runtime.
-	// With the sprint-2C-A writer cap (single-indirect, bsize=4096)
-	// only files ≤ ~2 MiB land in UFS, so the actual payload after
-	// the kernel-skip is ~2.5 MiB; an 8 MiB UFS comfortably holds
-	// it with metadata overhead, keeping the total disk image at
-	// ~25 MiB (16 MiB ESP + 8 MiB UFS + GPT overhead).
-	minUFSBytes     = 8 * 1024 * 1024 // 8 MiB floor for sprint-2C-Integration
-	ufsHeadroomMult = 2               // 2× tar size for fragmentation slack
+	// (plus oras's HTTPS working set + SHA-256 + manifest decode +
+	// TLS records + transient GC garbage), so the disk image MUST
+	// stay well under ~45 MiB to leave 200 MiB of streaming headroom.
+	// Sprint 2D switched the writer to bsize=32768 + double-indirect,
+	// lifting the per-file cap from ~2 MiB to ~128 MiB (single-
+	// indirect) and ~8 GiB (double-indirect). At bsize=32768 the
+	// 29 MiB kernel takes 29 MiB data + 32 KiB single-indirect; with
+	// ~3 MiB of kmods + cg metadata the whole boot tree fits in a
+	// 40 MiB UFS. Total image 44 MiB (4 MiB ESP + 40 MiB UFS + GPT).
+	minUFSBytes     = 48 * 1024 * 1024 // 48 MiB floor for sprint 2D (holds 29 MiB kernel + kmods + ~10 MiB UFS metadata)
+	ufsHeadroomMult = 0                // disabled: we size precisely to keep tamago heap headroom
 )
 
 // efiSystemPartitionGUID = C12A7328-F81F-11D2-BA4B-00A0C93EC93B
@@ -155,19 +157,16 @@ func main() {
 		}
 		ufsLen = *ufsSize
 		if ufsLen == 0 {
-			// After the writer-cap skip of the 29 MiB kernel, the
-			// actual payload landing in UFS is small (~2.5 MiB of
-			// .ko + loader.conf + Lua scripts). 32 MiB is plenty and
-			// keeps the total disk image well under tamago's 256 MiB
-			// heap reservation for the OCI streaming step.
+			// Sprint 2D: the 29 MiB FreeBSD kernel now lands in UFS
+			// (bsize=32768 + double-indirect lifts the per-file cap
+			// to ~8 GiB). Size the partition at max(64 MiB floor,
+			// 2× tar size) so the kernel + virtio kmods + Lua
+			// scripts + inode/cg overhead all fit with comfortable
+			// headroom while keeping the total image well under
+			// tamago's 256 MiB heap reservation.
 			ufsLen = minUFSBytes
-			// Tar-headroom heuristic kept for the case where the writer
-			// cap is lifted in sprint 2D and the kernel actually lands.
 			if want := int64(len(tarBytes)) * int64(ufsHeadroomMult); want > ufsLen {
-				// Disabled-by-default growth path: only kick in if the
-				// per-file cap rises. Today every >2 MiB file is
-				// skipped, so this branch stays dormant.
-				_ = want
+				ufsLen = want
 			}
 		}
 		// Round up to 1 MiB boundary.
@@ -356,9 +355,14 @@ func (m *memWriterAt) ReadAt(p []byte, off int64) (int, error) {
 // emit children first.
 func buildUFSFromTar(tarBytes []byte, size int64) ([]byte, error) {
 	w := newMemWriterAt(size)
-	fs, err := ufs.Mkfs(w, size)
+	// Sprint 2D: explicitly request BlockSize=32768 (matching FreeBSD
+	// newfs(8) default on devices ≥ 2 GiB). Bumps single-indirect
+	// reach from ~2 MiB to ~128 MiB and engages double-indirect
+	// (~8 GiB) on top — both needed so the 29 MiB FreeBSD kernel
+	// lands in /boot/kernel/kernel without being skipped.
+	fs, err := ufs.MkfsWith(w, size, ufs.MkfsOptions{BlockSize: 32768})
 	if err != nil {
-		return nil, fmt.Errorf("ufs.Mkfs(%d): %w", size, err)
+		return nil, fmt.Errorf("ufs.MkfsWith(%d, bsize=32768): %w", size, err)
 	}
 
 	// First pass: collect entries.
@@ -417,15 +421,11 @@ func buildUFSFromTar(tarBytes []byte, size int64) ([]byte, error) {
 		return nil
 	}
 
-	// Writer cap (sprint 2C-A): bsize=4096 + single-indirect only =>
-	// max file size = (NumDirect + Nindir) * bsize = (12 + 512) * 4096
-	// ≈ 2 MiB. Files above this are skipped with a clear diagnostic;
-	// sprint 2D extends the writer to bsize=32768 + double-indirect
-	// (the kernel is 29 MiB).
-	const maxFileBytes = (12 + 512) * 4096
-
-	var nFiles, nDirs, nLinks, nSkipped int
-	var skippedLog []string
+	// Sprint 2D: the writer cap is now astronomical (bsize=32768 →
+	// 128 MiB single-indirect + 8 GiB double-indirect), so the
+	// per-file size skip from sprint 2C-A is gone. Every tar entry
+	// is written verbatim.
+	var nFiles, nDirs, nLinks int
 	for _, e := range entries {
 		name := "/" + strings.Trim(e.hdr.Name, "/")
 		if name == "/" {
@@ -445,12 +445,6 @@ func buildUFSFromTar(tarBytes []byte, size int64) ([]byte, error) {
 			perm := os.FileMode(e.hdr.Mode & 0o7777)
 			if perm == 0 {
 				perm = 0o644
-			}
-			if len(e.body) > maxFileBytes {
-				skippedLog = append(skippedLog,
-					fmt.Sprintf("  - %s (%d bytes > %d cap)", name, len(e.body), maxFileBytes))
-				nSkipped++
-				continue
 			}
 			if err := fs.WriteFile(name, e.body, perm); err != nil {
 				return nil, fmt.Errorf("WriteFile %s (%d bytes): %w", name, len(e.body), err)
@@ -472,16 +466,8 @@ func buildUFSFromTar(tarBytes []byte, size int64) ([]byte, error) {
 				name, e.hdr.Typeflag)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "[buildespimg] UFS populated: %d dirs, %d files, %d symlinks (%d skipped — see below)\n",
-		nDirs, nFiles, nLinks, nSkipped)
-	if nSkipped > 0 {
-		fmt.Fprintf(os.Stderr, "[buildespimg] files skipped (over sprint-2C-A writer cap of %d bytes):\n", maxFileBytes)
-		for _, s := range skippedLog {
-			fmt.Fprintln(os.Stderr, s)
-		}
-		fmt.Fprintln(os.Stderr,
-			"[buildespimg] sprint 2D: extend ufs.Mkfs to bsize=32768 + double-indirect to ship the 29 MiB FreeBSD kernel.")
-	}
+	fmt.Fprintf(os.Stderr, "[buildespimg] UFS populated (sprint 2D, bsize=32768): %d dirs, %d files, %d symlinks\n",
+		nDirs, nFiles, nLinks)
 	return w.b, nil
 }
 

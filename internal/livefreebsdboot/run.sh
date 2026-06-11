@@ -124,6 +124,10 @@ else
     xorriso -osirrox on -indev "$SRC_PATH" -extract /boot/loader.efi "$WORK_PRE/loader.efi" 2>&1 | tail -3 >&2
     [[ -f "$WORK_PRE/loader.efi" ]] || { echo "[live-freebsdboot] failed to extract loader.efi from $SRC_PATH" >&2; exit 1; }
 
+    # Sprint 2D: keep ESP at 16 MiB (proven FAT16 + OVMF stable202605
+    # compat). The tamago streaming pipeline OOMs above ~30 MiB total
+    # disk image regardless of UFS contents — that's a separate
+    # streaming-refactor blocker tracked outside sprint 2D.
     echo "[live-freebsdboot:$ARCH] building 16 MiB FAT16 ESP" >&2
     dd if=/dev/zero of="$WORK_PRE/fat.img" bs=1m count=16 status=none
     mformat -i "$WORK_PRE/fat.img" :: >&2
@@ -157,9 +161,12 @@ else
         UFS_SECTORS=$(( UFS_END_LBA - UFS_START_LBA + 1 ))
         echo "[live-freebsdboot:$ARCH] UFS partition: LBA $UFS_START_LBA..$UFS_END_LBA ($UFS_SECTORS sectors)" >&2
         dd if="$IMG_PATH" of="$WORK_PRE/ufs-part.img" bs=512 skip="$UFS_START_LBA" count="$UFS_SECTORS" status=none
+        # Sprint 2D: kernel now lands (bsize=32768 + double-indirect).
+        # Require it so the cross-check fails fast if Mkfs ever drops
+        # back to the legacy small-block defaults.
         (cd "$REPO_DIR/internal/livefreebsdboot/extractufs/verify" && \
             GOWORK=off go run . -img "$WORK_PRE/ufs-part.img" \
-                -require-kernel=false -require-loader-conf=true) >&2 || \
+                -require-kernel=true -require-loader-conf=true) >&2 || \
             { echo "[live-freebsdboot] FATAL: buildespimg's UFS partition fails extractufs/verify cross-check" >&2; exit 1; }
     fi
 fi
