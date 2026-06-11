@@ -29,7 +29,7 @@
 //     image from sprint 1.2), the helper returns ErrNoUFSPartition
 //     and the probe continues with FAT-only behaviour.
 
-//go:build phase3_oci_freebsd_boot && tamago && amd64
+//go:build (phase3_oci_freebsd_boot || phase3_oci_netbsd_boot || phase3_oci_openbsd_boot) && tamago && amd64
 
 package main
 
