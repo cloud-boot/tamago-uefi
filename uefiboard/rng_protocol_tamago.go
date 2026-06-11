@@ -52,13 +52,19 @@ var publishedRNGs = map[uintptr]*rngPublishState{}
 func rngGetRNG_trampoline()
 func rngGetInfo_trampoline()
 
-// Function-value indirections so we can fish the asm entry PC out
-// by reading the *funcval first word (same trick as
-// loadFile_trampolineFV in initrd_protocol_tamago.go).
-var (
-	rngGetRNG_trampolineFV  = rngGetRNG_trampoline
-	rngGetInfo_trampolineFV = rngGetInfo_trampoline
-)
+// rngTrampolinePCs returns the .abi0 entry PCs of the two RNG
+// trampolines. The per-arch implementation lives in
+// rng_protocol_trampolinepc_<arch>.go:
+//
+//   - amd64 keeps the legacy funcval-first-word deref (Sprint 1.2
+//     did NOT touch RNG; the RNG path predates the ABIInternal-wrapper
+//     diagnosis and has not manifested the symptom under M8.x).
+//   - arm64 / riscv64 / loong64 call the per-arch
+//     rngGetRNG_trampolinePC / rngGetInfo_trampolinePC asm helpers
+//     (Sprint 1.3 R-fbsd1c), which use the assembler's
+//     `MOVD $sym(SB),Rn` pseudo (LEAQ-direct equivalent) to resolve
+//     directly to the .abi0 entry — bypassing any Go ABIInternal
+//     wrapper that might end with FP / g-register clobbers.
 
 func init() {
 	rngEntropy = readXorshiftTamago
@@ -245,9 +251,10 @@ func PublishRNG() (uintptr, error) {
 		}
 	}
 
-	// Resolve the asm trampoline entry PCs.
-	getRNGPC := **(**uintptr)(unsafe.Pointer(&rngGetRNG_trampolineFV))
-	getInfoPC := **(**uintptr)(unsafe.Pointer(&rngGetInfo_trampolineFV))
+	// Resolve the asm trampoline entry PCs. Per-arch helper handles
+	// the amd64 funcval-deref vs arm64/riscv64/loong64 LEAQ-direct
+	// PC-helper split (see rngTrampolinePCs docstring above).
+	getRNGPC, getInfoPC := rngTrampolinePCs()
 	protocol := &EFIRngProtocol{
 		GetInfo: uint64(getInfoPC),
 		GetRNG:  uint64(getRNGPC),
