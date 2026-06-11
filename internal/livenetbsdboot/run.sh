@@ -36,10 +36,19 @@
 #
 # Environment overrides:
 #   CLOUDBOOT_NETBSD_IMAGE:   path to a local NetBSD .iso (default:
-#                             $HOME/Downloads/NetBSD-10.0-amd64.iso)
+#                             $HOME/Downloads/NetBSD-10.0-amd64-boot.iso —
+#                             the small ~307 MiB installer CD shipping
+#                             /usr/mdec/bootx64.efi; the full 622 MiB
+#                             NetBSD-10.0-amd64.iso also works)
 #   CLOUDBOOT_OVMF_AMD64_CODE / _VARS: EDK2 .fd paths.
 #   NETBSD_LIVE_TIMEOUT:      per-run wall-clock cap (default 240)
 #   NETBSD_LIVE_KEEPRUN:      1 → keep ESP + qemu logs in /tmp
+#
+# Image size note: sprint 3.x targeted the smallest viable NetBSD bootable
+# image. NetBSD-10.0-amd64.iso (622 MiB) exceeded the download budget
+# (only 167/622 MiB pulled in CI). Switched to the installer boot.iso
+# (~307 MiB, half the size) which ships the same amd64 EFI bootloader
+# at /usr/mdec/bootx64.efi. The runner now auto-downloads it on demand.
 set -euo pipefail
 
 ARCH="${1:-}"
@@ -55,11 +64,17 @@ fi
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TIMEOUT_SECONDS="${NETBSD_LIVE_TIMEOUT:-240}"
 
+# Smaller installer boot.iso (~307 MiB) preferred over the full
+# NetBSD-10.0-amd64.iso (622 MiB) — both ship an amd64 EFI bootloader
+# usable by the chain; boot.iso costs half the download budget.
 DEFAULT_IMG_PATHS=(
+    "$HOME/Downloads/NetBSD-10.0-amd64-boot.iso"
     "$HOME/Downloads/NetBSD-10.0-amd64.iso"
     "$HOME/Downloads/NetBSD-9.3-amd64.iso"
+    "/tmp/netbsd/NetBSD-10.0-amd64-boot.iso"
     "/tmp/netbsd/NetBSD-10.0-amd64.iso"
 )
+NETBSD_BOOT_ISO_URL="${CLOUDBOOT_NETBSD_IMAGE_URL:-https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.0/amd64/installation/cdrom/boot.iso}"
 SRC_PATH="${CLOUDBOOT_NETBSD_IMAGE:-}"
 if [[ -z "$SRC_PATH" ]]; then
     for cand in "${DEFAULT_IMG_PATHS[@]}"; do
@@ -67,29 +82,49 @@ if [[ -z "$SRC_PATH" ]]; then
     done
 fi
 if [[ -z "$SRC_PATH" || ! -f "$SRC_PATH" ]]; then
-    echo "[live-netbsdboot] no NetBSD image found; set CLOUDBOOT_NETBSD_IMAGE or download to one of:" >&2
-    for cand in "${DEFAULT_IMG_PATHS[@]}"; do echo "    $cand" >&2; done
-    echo "    e.g. curl -fL -o /tmp/netbsd/NetBSD-10.0-amd64.iso https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.0/images/NetBSD-10.0-amd64.iso" >&2
-    exit 1
+    # Auto-download the small ~307 MiB installer boot.iso so the live
+    # smoke is self-contained (sprint 3.x: budget-friendly image survey).
+    AUTO_PATH="/tmp/netbsd/NetBSD-10.0-amd64-boot.iso"
+    mkdir -p "$(dirname "$AUTO_PATH")"
+    echo "[live-netbsdboot:$ARCH] no cached NetBSD image; downloading $NETBSD_BOOT_ISO_URL → $AUTO_PATH" >&2
+    if curl -fL --retry 3 --max-time 600 -o "$AUTO_PATH.part" "$NETBSD_BOOT_ISO_URL"; then
+        mv "$AUTO_PATH.part" "$AUTO_PATH"
+        SRC_PATH="$AUTO_PATH"
+    else
+        rm -f "$AUTO_PATH.part"
+        echo "[live-netbsdboot] auto-download failed; set CLOUDBOOT_NETBSD_IMAGE or pre-cache to one of:" >&2
+        for cand in "${DEFAULT_IMG_PATHS[@]}"; do echo "    $cand" >&2; done
+        echo "    e.g. curl -fL -o /tmp/netbsd/NetBSD-10.0-amd64-boot.iso $NETBSD_BOOT_ISO_URL" >&2
+        exit 1
+    fi
 fi
-echo "[live-netbsdboot:$ARCH] NetBSD source image: $SRC_PATH" >&2
+echo "[live-netbsdboot:$ARCH] NetBSD source image: $SRC_PATH ($(stat -f %z "$SRC_PATH" 2>/dev/null || stat -c %s "$SRC_PATH") bytes)" >&2
 
 WORK_PRE="$(mktemp -d -t cloudboot-netbsd-pre-XXXXXX)"
 trap 'rm -rf "$WORK_PRE"' EXIT
 
 # 1) Extract bootx64.efi from the NetBSD source ISO. NetBSD distributes
-#    its amd64 EFI loader at /EFI/BOOT/BOOTX64.EFI on the install ISO
-#    (UEFI fallback path). xorriso reads it via the path inside the
-#    ISO9660 / Joliet volume.
-echo "[live-netbsdboot:$ARCH] extracting /EFI/BOOT/BOOTX64.EFI from $SRC_PATH" >&2
-if ! xorriso -osirrox on -indev "$SRC_PATH" -extract /EFI/BOOT/BOOTX64.EFI "$WORK_PRE/bootx64.efi" 2>&1 | tail -3 >&2; then
-    # Alternative NetBSD path naming on some releases — try lowercase.
-    xorriso -osirrox on -indev "$SRC_PATH" -extract /efi/boot/bootx64.efi "$WORK_PRE/bootx64.efi" 2>&1 | tail -3 >&2 || true
-fi
-if [[ ! -f "$WORK_PRE/bootx64.efi" ]]; then
+#    its amd64 EFI loader at two possible locations:
+#      - /EFI/BOOT/BOOTX64.EFI  (full install ISO, UEFI fallback path)
+#      - /usr/mdec/bootx64.efi  (small installer boot.iso — EFI loader
+#                                only embedded in El-Torito boot image,
+#                                surfaced separately under /usr/mdec/)
+#    Try the canonical UEFI fallback path first, then the boot.iso path.
+echo "[live-netbsdboot:$ARCH] extracting bootx64.efi from $SRC_PATH" >&2
+extract_try() {
+    local path="$1"
+    xorriso -osirrox on -indev "$SRC_PATH" -extract "$path" "$WORK_PRE/bootx64.efi" 2>&1 | tail -3 >&2
+    [[ -f "$WORK_PRE/bootx64.efi" && -s "$WORK_PRE/bootx64.efi" ]]
+}
+extract_try /EFI/BOOT/BOOTX64.EFI \
+    || extract_try /efi/boot/bootx64.efi \
+    || extract_try /usr/mdec/bootx64.efi \
+    || true
+if [[ ! -f "$WORK_PRE/bootx64.efi" || ! -s "$WORK_PRE/bootx64.efi" ]]; then
     echo "[live-netbsdboot] failed to extract bootx64.efi from $SRC_PATH (NetBSD EFI path varies by release — verify with: xorriso -indev $SRC_PATH -find / -name 'bootx64*')" >&2
     exit 1
 fi
+echo "[live-netbsdboot:$ARCH] bootx64.efi: $(stat -f %z "$WORK_PRE/bootx64.efi" 2>/dev/null || stat -c %s "$WORK_PRE/bootx64.efi") bytes" >&2
 
 # 2) Build the 16 MiB FAT16 ESP holding bootx64.efi at the canonical
 #    UEFI fallback path. Reuses livefreebsdboot/buildespimg — the GPT
