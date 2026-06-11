@@ -1,5 +1,9 @@
 # cloud-boot/tamago-uefi
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/cloud-boot/tamago-uefi.svg)](https://pkg.go.dev/github.com/cloud-boot/tamago-uefi)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![Nightly vmlinuz](https://github.com/cloud-boot/tamago-uefi/actions/workflows/vmlinuz-nightly.yml/badge.svg)](https://github.com/cloud-boot/tamago-uefi/actions/workflows/vmlinuz-nightly.yml)
+
 A pure-Go bare-metal **UEFI** application targeting **multiple CPU
 architectures** on the standard Go runtime via
 [TamaGo](https://github.com/usbarmory/tamago) (`GOOS=tamago`), packaged to
@@ -322,8 +326,50 @@ PCI walk -> virtio-net -> DHCPv4 -> DNS -> TLS (CCADB roots) -> HTTPS
 | **M8.13**  | Debian 13 unified across all four arches                                                                         | SHIPPED 2026-06-10 |
 | **M8.14**  | `R-amd64j` CLOSED — EDK2 OVMF amd64 `LoadFile2` quirk worked around via `initrd=` kernel cmdline + ESP `SimpleFileSystem` file + `InheritParentDeviceHandle` ; amd64 lands in Linux userspace | SHIPPED 2026-06-10 |
 | **M9.0..M9.2** | Interactive boot menu (selector + cmdline editor + persistence) shipped                                      | SHIPPED 2026-06-10 |
-| **R-M9.1a** | virtio-console firmware handoff — pre-EBS console rerouting under EDK2                                          | next |
-| **R-M9.2a** | `time.Sleep` under TamaGo+UEFI — preemption-edge timer-wheel residency                                          | next |
+| **M8.15**  | Unify all 4 arches on `initrd=` cmdline path (espfile mode) — drop per-arch `LoadFile2` branching from the live boot pipeline | SHIPPED 2026-06-10 ([`51f7005`](https://github.com/cloud-boot/tamago-uefi/commit/51f7005)) |
+| **M8.16**  | Delete the `LoadFile2` initrd publish path entirely — ~1684 LOC excised ; `R-M8.16a` binary-layout regression fixed in the same commit | SHIPPED 2026-06-10 ([`2868756`](https://github.com/cloud-boot/tamago-uefi/commit/2868756)) |
+| **R-M9.1a** | virtio-console firmware handoff — DOCUMENTED as working-as-intended                                            | CLOSED |
+| **R-M9.2a** | `time.Sleep` under TamaGo+UEFI — DOCUMENTED as working-as-intended                                              | CLOSED |
+
+### Phase 3 — OS-agnostic OCI boot
+
+Phase 3 generalises the Phase 2 chain-boot mechanism : instead of
+`LoadImage`-ing a Linux kernel directly, the loader materialises an
+in-memory disk image containing the target OS's own first-stage
+loader (`loader.efi`, `boot.efi`, `bootmgfw.efi`), publishes it
+through pure-Go `EFI_BLOCK_IO_PROTOCOL` + `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`
+shims it implements itself, then `LoadImage` + `StartImage`s the
+native loader. The OS's loader thinks it's running off a real block
+device and walks its own root in the usual way.
+
+| Sprint | Scope | Status | Reference commit |
+| --- | --- | --- | --- |
+| **Sprint 1**    | OS-agnostic OCI boot architecture — FreeBSD MVP                                                          | SHIPPED | [`ff2b56d`](https://github.com/cloud-boot/tamago-uefi/commit/ff2b56d) |
+| **Sprint 1.1**  | SFS-parent filter + `LoadImageFromSFS` + custom ESP image build                                         | SHIPPED | [`f5367a1`](https://github.com/cloud-boot/tamago-uefi/commit/f5367a1) |
+| **Sprint 1.2**  | Close `R-fbsd1a` (`ConnectController` #PF) — finding : Go ABIInternal wrapper interpose → LEAQ-direct `.abi0` entry helper pattern | SHIPPED | [`d3eaa38`](https://github.com/cloud-boot/tamago-uefi/commit/d3eaa38) |
+| **Sprint 1.3**  | Defensive FP saves + LEAQ-direct on arm64/riscv64/loong64 RNG trampolines (multi-arch port of 1.2 finding)| SHIPPED | [`5874f50`](https://github.com/cloud-boot/tamago-uefi/commit/5874f50) |
+| **Sprint 2A**   | `go-filesystems/ufs` read+write surface + `Mkfs`                                                         | SHIPPED | (`go-filesystems/ufs`) |
+| **Sprint 2B**   | `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL` surface + UFS wire                                                     | SHIPPED | [`2831705`](https://github.com/cloud-boot/tamago-uefi/commit/2831705) |
+| **Sprint 2C**   | Real FreeBSD UFS2 fixture (`extractufs`) + fresh-UFS2 oracle (`genufs`) — 3 parallel sources cross-validated | SHIPPED | [`26a8357`](https://github.com/cloud-boot/tamago-uefi/commit/26a8357), [`d5f5294`](https://github.com/cloud-boot/tamago-uefi/commit/d5f5294) |
+| **Sprint 2C-Integration** | 2-partition disk, `PublishSFS` OK, FreeBSD `loader.efi` reads our UFS                          | SHIPPED | [`c37108f`](https://github.com/cloud-boot/tamago-uefi/commit/c37108f) |
+| **Sprint 2D**   | Wire `buildespimg` to `MkfsWith(BlockSize=32768)` — double-indirect on big files                          | SHIPPED | [`44e3553`](https://github.com/cloud-boot/tamago-uefi/commit/44e3553) |
+| **Sprint 2D'**  | Eliminate `PublishBlockIO` redundant copy                                                                 | SHIPPED | [`050209b`](https://github.com/cloud-boot/tamago-uefi/commit/050209b) |
+| **Sprint 2D''** | `FetchBlobToBuffer` eliminates `bytes.Buffer` transient                                                   | SHIPPED | [`0595ca4`](https://github.com/cloud-boot/tamago-uefi/commit/0595ca4) |
+| **Sprint 3**    | OpenBSD live boot — reaches `boot>` prompt end-to-end ; NetBSD MVP also shipped (gated on ISO size)       | SHIPPED | [`d66d338`](https://github.com/cloud-boot/tamago-uefi/commit/d66d338) |
+| **Sprint 4**    | Windows boot scaffolding — build pipeline + `BOOTX64-WINDOWSBOOT.EFI` ships ; no live boot yet (gated on NTFS reader) | SHIPPED | [`44140a9`](https://github.com/cloud-boot/tamago-uefi/commit/44140a9) |
+| **Sprint 2E**   | FreeBSD : currdev OK, OOM at kernel-load — investigation in progress                                     | PENDING | — |
+| **Sprint 3.x**  | NetBSD live boot — gated on ISO download budget                                                          | PENDING | — |
+| **Sprint 4.0a** | Windows live boot — gated on pure-Go NTFS reader (`go-filesystems/ntfs`, multi-month)                     | PENDING | — |
+
+### Live (OS, arch) status matrix — Phase 3 (2026-06-11)
+
+| OS                  | amd64       | arm64   | riscv64 | loong64 | Notes |
+| ------------------- | ----------- | ------- | ------- | ------- | ----- |
+| **Linux (Debian 13)** | LIVE      | LIVE    | LIVE    | LIVE    | Phase 2 ; userspace, 16-18 s cold-DHCP ; unified on `initrd=` (`M8.15`) |
+| **OpenBSD**         | **LIVE**    | —       | —       | —       | Phase 3 sprint 3 ; `boot>` prompt end-to-end |
+| **FreeBSD**         | partial     | —       | —       | —       | `loader.efi` selects our UFS as `currdev` ; OOM at kernel-load (sprint 2E) |
+| **NetBSD**          | scaffolded  | —       | —       | —       | probe + EFI + runner ready ; gated on ISO download size |
+| **Windows**         | scaffolded  | —       | —       | —       | `BOOTX64-WINDOWSBOOT.EFI` ships ; gated on real NTFS reader |
 
 ### Live status per arch (2026-06-10)
 
