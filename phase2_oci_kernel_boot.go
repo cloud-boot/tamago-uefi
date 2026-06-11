@@ -34,6 +34,16 @@
 //       digest-verification path), then hands the verified bytes
 //       to LoadImage+StartImage exactly the way MODE A would.
 //
+// M8.16 (2026-06-11) — the LoadFile2 / LINUX_EFI_INITRD_MEDIA_GUID
+// publish path is GONE. M8.15 had already unified all 4 arches onto
+// the cmdline-driven `initrd=<path>` ESP loader via
+// `uefiboard.InheritParentDeviceHandle`; M8.16 deletes the now-dead
+// `uefiboard.PublishInitrd` API (Go side + per-arch asm trampolines +
+// registry). The MODE C dispatcher below now only services the
+// `kernelBootInitrdMode == "espfile"` branch — the OCI-streaming and
+// embedded-cpio.gz initrd-publish branches are removed; the runner
+// stages `initrd.gz` directly on the ESP.
+//
 //     The current default is MODE B because we do not yet ship a
 //     publicly-published BOOT*-CHAINED.EFI as an OCI artifact (the
 //     short-term GHCR PAT lacks `write:packages`). MODE A is wired
@@ -78,7 +88,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
-	"net"
 	"runtime"
 	"time"
 	"unsafe"
@@ -89,6 +98,23 @@ import (
 	"github.com/cloud-boot/tamago-uefi/uefiboard/ministack"
 	"github.com/cloud-boot/tamago-uefi/uefiboard/ministack/oci"
 )
+
+// keepEmbedInitramfsAlive references embed_initramfs.Bytes so the
+// linker keeps the per-arch embedded cpio.gz blob in the binary even
+// though M8.16 removed the runtime callers (PublishInitrd is gone and
+// the espfile path reads initrd from the ESP, not from this embed).
+//
+// Why we still want the blob compiled in: removing it shrinks the Go
+// binary by ~712 KiB which shifts the EFI LoadImage memory map
+// allocations downstream — empirically observed on riscv64 to push the
+// initrd into a memory region the kernel later marks "INITRD overlaps
+// in-use memory region" and disables. Keeping the blob preserves the
+// pre-M8.16 binary layout the M8.13/M8.15 live tests validated.
+//
+// The variable is package-level so the linker can never DCE the
+// reference. The byte-count assignment is dead-store-eliminated by the
+// optimiser but the address-of read keeps the underlying global alive.
+var keepEmbedInitramfsAlive = len(embed_initramfs.Bytes())
 
 // kernelBootTargetRef / kernelBootCmdline / kernelBootInitrdRef /
 // kernelBootUseEmbeddedInitrd are now defined per-arch in
@@ -120,14 +146,12 @@ import (
 //     The Linux EFI-stub reads it from LoadedImageProtocol.LoadOptions
 //     (UEFI 2.10 §9.2 / Documentation/admin-guide/efi-stub.rst).
 //
-//   - kernelBootInitrdRef: OCI ref to stream as the initrd. Empty =
-//     fall back to embedded fallback or skip publication entirely.
-//     M8.4 status: empty on all arches (no publicly-pullable
-//     standalone initramfs OCI ref discovered).
-//
-//   - kernelBootUseEmbeddedInitrd: when true and kernelBootInitrdRef
-//     is empty, publishes the embedded 260-byte cpio.gz from
-//     internal/embed_initramfs as the initrd.
+//   - kernelBootInitrdRef / kernelBootUseEmbeddedInitrd: pre-M8.16
+//     gated the OCI-streaming and embedded-cpio.gz initrd-PUBLISH
+//     paths. M8.15 unified all 4 arches onto the espfile loader and
+//     M8.16 deleted the LoadFile2 publish API; the constants are
+//     now documentation-only ballast on every per-arch
+//     kernelboot_<arch>.go.
 //
 // Reference: cloud-boot/docs/tamago-uefi-phase2-oci-loader.md §M8.3/§M8.4.
 
@@ -523,9 +547,9 @@ const kernelBootMaxLayerSize = 64 * 1024 * 1024
 const kernelBootVmlinuzName = "boot/vmlinuz"
 
 // runKernelBootLinuxKernel is the MODE C entry — real-registry
-// streaming + tar.gz extract + SetLoadOptions(cmdline) + (optional)
-// PublishInitrd + LoadImage + StartImage. Fires when
-// kernelBootTargetRef AND kernelBootCmdline are both non-empty.
+// streaming + tar.gz extract + SetLoadOptions(cmdline) +
+// InheritParentDeviceHandle (espfile) + LoadImage + StartImage. Fires
+// when kernelBootTargetRef AND kernelBootCmdline are both non-empty.
 //
 // Flow:
 //   1. Bring up virtio-net + DHCP + ministack roots (same as MODE A).
@@ -537,8 +561,11 @@ const kernelBootVmlinuzName = "boot/vmlinuz"
 //   7. SetLoadOptions(kernelBootCmdline) on the child image handle —
 //      the Linux EFI-stub reads it from LoadedImageProtocol.LoadOptions
 //      to populate the command line.
-//   8. PublishInitrd (optional, gated on kernelBootInitrdRef — empty
-//      in M8.3, deferred behind agent #3's asm trampoline).
+//   8. InheritParentDeviceHandle — the kernel EFI-stub reads the
+//      initrd via the cmdline `initrd=<path>` token resolved against
+//      the parent ESP DeviceHandle we just copied in. The runner
+//      stages `initrd.gz` on the ESP before boot. This replaces the
+//      M8.2..M8.14 LoadFile2 publish path (deleted in M8.16).
 //   9. StartImage transfers control to the kernel EFI-stub.
 //
 // Expected M8.3 outcome on arm64: the kernel EFI-stub initialises,
@@ -678,6 +705,16 @@ func runKernelBootLinuxKernel() {
 		return
 	}
 	println("phase2-oci-kernel-boot: vmlinuz PE header OK (MZ)")
+
+	// Measured boot (ADDITIVE — gated on `-tags phase2_tpm_measure`).
+	// With the tag OFF, measurePhase2 is the no-op stub in
+	// phase2_tpm_measure_stub.go and this line is inert. With the tag
+	// ON it locates EFI_TCG2_PROTOCOL and, if a firmware TPM is present,
+	// extends PCR4 (kernel image) + PCR8 (cmdline) via
+	// HashLogExtendEvent, then reads PCR4 back over the same efitcg2
+	// transport. The kernel bytes here are exactly the SHA-256-verified
+	// blob, measured before LoadImage. No TPM ⇒ silently skipped.
+	measurePhase2(vmlinuz, kernelBootCmdline)
 
 	// M8.6: publish a DTB via gBS->InstallConfigurationTable BEFORE
 	// LoadImage. Closes R-M8.5a (DTB-absence Data Abort) on EDK2
@@ -840,76 +877,26 @@ func runKernelBootLinuxKernel() {
 		println("phase2-oci-kernel-boot: DTB probe: SystemTable not captured (cpuinit didn't run?) — skipping walk")
 	}
 
-	// Initrd publish (M8.4). Three sources, in priority order:
-	//   1. OCI streaming (kernelBootInitrdRef set) — production path.
-	//   2. Embedded minimal cpio.gz (kernelBootUseEmbeddedInitrd) —
-	//      M8.4 default, ~260 bytes, no network roundtrip.
-	//   3. None — pre-M8.4 cmdline-only behaviour (panics on most
-	//      kernels for lack of rootfs).
+	// Initrd handoff (M8.15 — unified onto the cmdline-driven
+	// `initrd=<path>` ESP loader for ALL 4 arches; M8.16 deleted the
+	// LoadFile2/LINUX_EFI_INITRD_MEDIA_GUID publish path entirely).
+	// The kernel EFI-stub reads `initrd=\initrd.gz` from
+	// LoadedImageProtocol.LoadOptions, then resolves the path against
+	// our inherited parent ESP DeviceHandle via SimpleFileSystem. The
+	// runner (internal/livekernelboot/run.sh) is responsible for
+	// staging the file on the ESP before boot; if it doesn't, the
+	// kernel logs `Failed to load initrd!` and continues cmdline-only.
 	//
-	// R-M8.4a diagnostic instrumentation (2026-06-10, retained but
-	// gated): `uefiboard.LoadFileTraceEnabled` can be flipped to
-	// `true` here to paint a per-callback diagnostic line on the
-	// serial console (this/fp/bp/sizeP/bufP at entry, registry
-	// hit/miss, have/need, EFI_STATUS at return). Used to diagnose
-	// the off-by-one Go-ABI0-slot bug in the per-arch trampoline
-	// that caused `EFI stub: ERROR: Failed to load initrd!` on
-	// every two-call dance. Left wired (and off by default) so a
-	// future regression can re-enable in one line without
-	// re-developing the helper.
-	//   uefiboard.LoadFileTraceEnabled = true
-	var initrdHandle uintptr
-	switch {
-	case kernelBootInitrdMode == "espfile":
-		// amd64 R-amd64j: initrd is loaded by the kernel EFI-stub
-		// itself from the ESP via the cmdline `initrd=<path>` token
-		// (resolved against the parent DeviceHandle we just inherited
-		// above). Nothing for us to publish here — staging the file on
-		// the ESP is the run.sh/runner job; if the runner forgets we
-		// will get a kernel-side "Failed to load initrd" line in the
-		// boot log instead of a silent skip.
-		println("phase2-oci-kernel-boot: initrd source = ESP file (R-amd64j espfile mode; kernel will read via cmdline initrd=<path>)")
-	case kernelBootInitrdRef != "":
-		println("phase2-oci-kernel-boot: streaming initrd from OCI:", kernelBootInitrdRef)
-		initrdBytes, ierr := fetchInitrdFromOCI(s, lease.DNS[0], kernelBootInitrdRef)
-		if ierr != nil {
-			println("phase2-oci-kernel-boot: KERNEL-BOOT FAIL: fetchInitrdFromOCI:", ierr.Error())
-			return
-		}
-		println("phase2-oci-kernel-boot: initrd fetched + decompressed; bytes =", len(initrdBytes))
-		ihandle, perr := uefiboard.PublishInitrd(initrdBytes)
-		if perr != nil {
-			println("phase2-oci-kernel-boot: KERNEL-BOOT FAIL: PublishInitrd:", perr.Error())
-			return
-		}
-		initrdHandle = ihandle
-		println("phase2-oci-kernel-boot: PublishInitrd OK, initrd handle =", hexUintptrKernelBoot(initrdHandle))
-
-	case kernelBootUseEmbeddedInitrd:
-		// The embed is gzip-compressed cpio (per
-		// internal/embed_initramfs/doc.go). The Linux EFI-stub /
-		// initrd consumer accepts the gzip-wrapped cpio as-is
-		// (drivers/firmware/efi/libstub/efi-stub-helper.c just
-		// hands the bytes to populate_rootfs which understands the
-		// `1f 8b` gzip magic and inflates inline). We therefore
-		// publish the raw embedded bytes without decompressing
-		// host-side — saves ~30 µs of CPU and lets the kernel's
-		// own inflate handle the bookkeeping.
-		raw := embed_initramfs.Bytes()
-		println("phase2-oci-kernel-boot: using embedded minimal initrd; bytes =", len(raw))
-		if len(raw) >= 3 && raw[0] == 0x1f && raw[1] == 0x8b && raw[2] == 0x08 {
-			println("phase2-oci-kernel-boot: embedded initrd magic = 1f 8b 08 (gzip)")
-		}
-		ihandle, perr := uefiboard.PublishInitrd(raw)
-		if perr != nil {
-			println("phase2-oci-kernel-boot: KERNEL-BOOT FAIL: PublishInitrd (embedded):", perr.Error())
-			return
-		}
-		initrdHandle = ihandle
-		println("phase2-oci-kernel-boot: PublishInitrd OK, initrd handle =", hexUintptrKernelBoot(initrdHandle))
-
-	default:
-		println("phase2-oci-kernel-boot: no initrd source configured; kernel will boot cmdline-only")
+	// kernelBootInitrdMode is "espfile" on every per-arch
+	// kernelboot_<arch>.go in this tree — the switch the pre-M8.16
+	// code used here collapses to a single banner line. The legacy
+	// kernelBootInitrdRef + kernelBootUseEmbeddedInitrd per-arch
+	// constants are kept as documentation-only ballast for now (their
+	// runtime effect is zero).
+	if kernelBootInitrdMode == "espfile" {
+		println("phase2-oci-kernel-boot: initrd source = ESP file (M8.15 espfile mode; kernel reads via cmdline initrd=<path>)")
+	} else {
+		println("phase2-oci-kernel-boot: unknown kernelBootInitrdMode =", kernelBootInitrdMode, "— kernel will boot cmdline-only")
 	}
 
 	println("phase2-oci-kernel-boot: StartImage entering EFI-stub kernel")
@@ -921,12 +908,10 @@ func runKernelBootLinuxKernel() {
 		println("phase2-oci-kernel-boot: kernel reported non-success:", sErr.Error())
 	}
 
-	// Cleanup paths mirror MODE A.
-	if initrdHandle != 0 {
-		if uerr := uefiboard.UnpublishInitrd(initrdHandle); uerr != nil {
-			println("phase2-oci-kernel-boot: UnpublishInitrd warning:", uerr.Error())
-		}
-	}
+	// Cleanup paths mirror MODE A. M8.16: no initrd handle to undo —
+	// the kernel pulled initrd straight off the ESP via the cmdline
+	// `initrd=<path>` token; no protocol install ever happened on our
+	// side.
 	// M8.9: no PublishRNG to undo (UninstallAllRNG yanks the
 	// firmware's interface but installs no replacement).
 	if status != 0 {
@@ -1101,95 +1086,7 @@ type errorString string
 
 func (e errorString) Error() string { return string(e) }
 
-// fetchInitrdFromOCI streams the configured OCI ref's first layer
-// through the ministack OCI client + SHA-256 verification (same
-// pipeline as the kernel-layer fetch), then auto-detects gzip via
-// the `1f 8b 08` magic and inflates synchronously if needed. The
-// returned bytes are ready to hand to uefiboard.PublishInitrd.
-//
-// Why synchronous gunzip: same root cause as streamExtractVmlinuz
-// (R-M8.3b — TamaGo+UEFI has no async preemption, so io.Pipe +
-// producer goroutine deadlocks). We buffer the full compressed
-// layer in the Go heap first; the embedded fallback path makes the
-// 64 MiB cap above the only relevant upper bound here.
-//
-// Returns the raw initrd bytes (gunzipped if the source was gzip,
-// passthrough if not) and any error.
-func fetchInitrdFromOCI(s *ministack.Stack, dns net.IP, refStr string) ([]byte, error) {
-	ref, err := oci.ParseRef(refStr)
-	if err != nil {
-		return nil, err
-	}
-	reg := oci.NewRegistry(s, dns, ref)
-	reg.DialTimeout = 15 * time.Second
-	reg.RequestTimeout = 120 * time.Second
-
-	if aerr := reg.Authenticate(); aerr != nil {
-		return nil, aerr
-	}
-
-	rawIndex, contentType, ferr := reg.FetchManifestRaw(ref.Reference)
-	if ferr != nil {
-		return nil, ferr
-	}
-	var rawManifest []byte
-	if oci.IsIndex(rawIndex, contentType) {
-		idx, perr := oci.ParseIndex(rawIndex)
-		if perr != nil {
-			return nil, perr
-		}
-		picked, perr := oci.PickPlatform(idx, "linux", runtime.GOARCH)
-		if perr != nil {
-			return nil, perr
-		}
-		mraw, _, merr := reg.FetchManifestRaw(picked.Digest)
-		if merr != nil {
-			return nil, merr
-		}
-		rawManifest = mraw
-	} else {
-		rawManifest = rawIndex
-	}
-	m, mperr := oci.ParseManifest(rawManifest)
-	if mperr != nil {
-		return nil, mperr
-	}
-	if len(m.Layers) == 0 {
-		return nil, errInitrdNoLayers
-	}
-	target := m.Layers[0]
-	if target.Size > kernelBootMaxLayerSize {
-		return nil, errInitrdLayerTooBig
-	}
-
-	var buf bytes.Buffer
-	if _, serr := reg.FetchBlobStream(target, &buf); serr != nil {
-		return nil, serr
-	}
-	raw := buf.Bytes()
-
-	// Gzip auto-detect (RFC 1952 §2.3.1: magic 1f 8b, CM=08).
-	if len(raw) >= 3 && raw[0] == 0x1f && raw[1] == 0x8b && raw[2] == 0x08 {
-		gz, gerr := gzip.NewReader(bytes.NewReader(raw))
-		if gerr != nil {
-			return nil, gerr
-		}
-		defer gz.Close()
-		out, rerr := io.ReadAll(gz)
-		if rerr != nil {
-			return nil, rerr
-		}
-		return out, nil
-	}
-	return raw, nil
-}
-
-// errInitrdNoLayers reports an OCI manifest with zero layers — a
-// malformed initrd artifact.
-var errInitrdNoLayers = errorString("initrd OCI manifest has zero layers")
-
-// errInitrdLayerTooBig reports an initrd layer exceeding the same
-// 64 MiB cap as the kernel layer (kernelBootMaxLayerSize). Distro
-// initramfs blobs are 8..64 MiB; anything larger is almost
-// certainly a misconfigured ref.
-var errInitrdLayerTooBig = errorString("initrd layer size exceeds 64 MiB cap")
+// fetchInitrdFromOCI + the errInitrdNoLayers / errInitrdLayerTooBig
+// sentinels were deleted in M8.16 along with the LoadFile2 publish
+// path. Initrd now flows through the runner-staged ESP file (M8.15
+// espfile mode); cloud-boot doesn't pull it down anymore.

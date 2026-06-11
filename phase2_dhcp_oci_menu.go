@@ -531,22 +531,25 @@ func bootEntry(entry bootmenu.Entry, s *ministack.Stack, dns net.IP) {
 		println("phase2-dhcp-oci-menu: bootEntry: SetLoadOptions OK; cmdline len =", len(entry.Cmdline))
 	}
 
-	var initrdHandle uintptr
+	// M8.16 (2026-06-11) — the LoadFile2 publish path is GONE.
+	// phase2-oci-kernel-boot unified all 4 arches onto the
+	// cmdline-driven `initrd=<path>` ESP loader in M8.15 and M8.16
+	// deleted uefiboard.PublishInitrd entirely. The bootmenu probe
+	// follows the same shape: copy our parent ESP DeviceHandle into
+	// the kernel's LoadedImage (efi_open_volume(image) source for
+	// the EFI-stub's handle_cmdline_files path) and rely on the
+	// runner to have staged the initrd file on the ESP if the menu
+	// entry needs one. entry.InitrdRef is documentation-only in
+	// this probe; a future M9.x sprint can wire OCI -> ESP staging
+	// over phase-2 file-publish, but for the M8.16 deletion it is
+	// inert.
+	if ierr := uefiboard.InheritParentDeviceHandle(handle); ierr != nil {
+		println("phase2-dhcp-oci-menu: bootEntry FAIL: InheritParentDeviceHandle:", ierr.Error())
+		return
+	}
+	println("phase2-dhcp-oci-menu: bootEntry: InheritParentDeviceHandle OK (M8.16 espfile mode)")
 	if entry.InitrdRef != "" {
-		println("phase2-dhcp-oci-menu: bootEntry: streaming initrd from OCI:", entry.InitrdRef)
-		initrdBytes, ierr := fetchInitrdFromOCIMenu(s, dns, entry.InitrdRef)
-		if ierr != nil {
-			println("phase2-dhcp-oci-menu: bootEntry FAIL: fetchInitrdFromOCI:", ierr.Error())
-			return
-		}
-		println("phase2-dhcp-oci-menu: bootEntry: initrd fetched + decompressed; bytes =", len(initrdBytes))
-		ihandle, perr := uefiboard.PublishInitrd(initrdBytes)
-		if perr != nil {
-			println("phase2-dhcp-oci-menu: bootEntry FAIL: PublishInitrd:", perr.Error())
-			return
-		}
-		initrdHandle = ihandle
-		println("phase2-dhcp-oci-menu: bootEntry: PublishInitrd OK")
+		println("phase2-dhcp-oci-menu: bootEntry: initrd_ref =", entry.InitrdRef, "(documentation-only post-M8.16; runner must stage initrd on ESP)")
 	}
 
 	println("phase2-dhcp-oci-menu: bootEntry: StartImage entering EFI-stub kernel")
@@ -558,11 +561,6 @@ func bootEntry(entry bootmenu.Entry, s *ministack.Stack, dns net.IP) {
 		println("phase2-dhcp-oci-menu: bootEntry: kernel reported non-success:", sErr.Error())
 	}
 
-	if initrdHandle != 0 {
-		if uerr := uefiboard.UnpublishInitrd(initrdHandle); uerr != nil {
-			println("phase2-dhcp-oci-menu: bootEntry: UnpublishInitrd warning:", uerr.Error())
-		}
-	}
 	if status != 0 {
 		if uerr := uefiboard.UnloadImage(handle); uerr != nil {
 			println("phase2-dhcp-oci-menu: bootEntry: UnloadImage warning:", uerr.Error())
@@ -628,74 +626,11 @@ func streamExtractVmlinuzMenu(reg *oci.Registry, desc oci.Descriptor, name strin
 	}
 }
 
-// fetchInitrdFromOCIMenu mirrors fetchInitrdFromOCI from
-// phase2_oci_kernel_boot.go. Same shape; renamed to avoid a
-// double-definition when both probes' tags happen to be set in the
-// same binary (an unlikely combination, but the rename keeps both
-// translation units valid).
-func fetchInitrdFromOCIMenu(s *ministack.Stack, dns net.IP, refStr string) ([]byte, error) {
-	ref, err := oci.ParseRef(refStr)
-	if err != nil {
-		return nil, err
-	}
-	reg := oci.NewRegistry(s, dns, ref)
-	reg.DialTimeout = 15 * time.Second
-	reg.RequestTimeout = 120 * time.Second
-	if aerr := reg.Authenticate(); aerr != nil {
-		return nil, aerr
-	}
-	rawIndex, contentType, ferr := reg.FetchManifestRaw(ref.Reference)
-	if ferr != nil {
-		return nil, ferr
-	}
-	var rawManifest []byte
-	if oci.IsIndex(rawIndex, contentType) {
-		idx, perr := oci.ParseIndex(rawIndex)
-		if perr != nil {
-			return nil, perr
-		}
-		picked, perr := oci.PickPlatform(idx, "linux", runtime.GOARCH)
-		if perr != nil {
-			return nil, perr
-		}
-		mraw, _, merr := reg.FetchManifestRaw(picked.Digest)
-		if merr != nil {
-			return nil, merr
-		}
-		rawManifest = mraw
-	} else {
-		rawManifest = rawIndex
-	}
-	m, mperr := oci.ParseManifest(rawManifest)
-	if mperr != nil {
-		return nil, mperr
-	}
-	if len(m.Layers) == 0 {
-		return nil, errInitrdNoLayersMenu
-	}
-	target := m.Layers[0]
-	if target.Size > dhcpOCIMenuMaxLayerSize {
-		return nil, errInitrdLayerTooBigMenu
-	}
-	var buf bytes.Buffer
-	if _, serr := reg.FetchBlobStream(target, &buf); serr != nil {
-		return nil, serr
-	}
-	raw := buf.Bytes()
-	if len(raw) >= 3 && raw[0] == 0x1f && raw[1] == 0x8b && raw[2] == 0x08 {
-		gz, gerr := gzip.NewReader(bytes.NewReader(raw))
-		if gerr != nil {
-			return nil, gerr
-		}
-		defer gz.Close()
-		out, rerr := io.ReadAll(gz)
-		if rerr != nil {
-			return nil, rerr
-		}
-		return out, nil
-	}
-	return raw, nil
-}
+// fetchInitrdFromOCIMenu and its errInitrdNoLayersMenu /
+// errInitrdLayerTooBigMenu sentinels were deleted in M8.16. The menu
+// probe now relies on the runner staging the initrd file on the ESP
+// before boot (mirrors phase2_oci_kernel_boot's M8.15 espfile mode);
+// the bootmenu.Entry.InitrdRef field is documentation-only here.
 
 // errorStringMenu is a tiny local error type so the menu extractor
 // doesn't pull errors.New into the M9.2 build closure (it's already
@@ -709,8 +644,6 @@ var (
 	errVmlinuzNotFoundMenu  = errorStringMenu("vmlinuz entry not found in tar.gz layer")
 	errVmlinuzEmptyMenu     = errorStringMenu("vmlinuz tar entry has zero size")
 	errVmlinuzShortReadMenu = errorStringMenu("short read on vmlinuz tar entry")
-	errInitrdNoLayersMenu   = errorStringMenu("initrd OCI manifest has zero layers")
-	errInitrdLayerTooBigMenu = errorStringMenu("initrd layer size exceeds 64 MiB cap")
 )
 
 // busyWait spin-waits for `d` using runtime.Nanotime-style probing
