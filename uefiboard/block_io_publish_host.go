@@ -42,3 +42,11 @@ func ConnectController(controllerHandle uintptr) error {
 	}
 	panic("uefi: ConnectController not supported on host / non-amd64 tamago")
 }
+
+// DisconnectController host stub.
+func DisconnectController(controllerHandle uintptr) error {
+	if controllerHandle == 0 {
+		return errors.New("uefi: DisconnectController called with zero handle")
+	}
+	panic("uefi: DisconnectController not supported on host / non-amd64 tamago")
+}

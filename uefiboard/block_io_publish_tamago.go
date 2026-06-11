@@ -57,7 +57,8 @@ import (
 // ProtocolBufferCount*) shape doesn't accept our (Handle, NULL, NULL,
 // Recursive) args. Live test confirmed; offset corrected here.
 const (
-	efiBSConnectController = 264
+	efiBSConnectController    = 264
+	efiBSDisconnectController = 272
 )
 
 // EFISimpleFileSystemProtocolGUID + EFIBlockIOProtocolPublished are
@@ -350,6 +351,37 @@ func ConnectController(controllerHandle uintptr) error {
 	)
 	if status != efiSuccess {
 		return &EFIError{Status: status, Op: "ConnectController"}
+	}
+	return nil
+}
+
+// DisconnectController calls gBS->DisconnectController(handle, NULL, NULL)
+// to detach ALL drivers from `controllerHandle`. Use this before
+// OpenProtocol(PCI_IO) on a virtio device that EDK2 OvmfPkg already
+// bound BY_DRIVER (e.g., VirtioGpuDxe holds virtio-gpu); without it our
+// OpenProtocol blocks waiting for the firmware driver to release.
+// R-doom1a: unblocks DOOM probe's openGPU/openSound/openInput paths.
+func DisconnectController(controllerHandle uintptr) error {
+	if controllerHandle == 0 {
+		return errors.New("uefi: DisconnectController called with zero handle")
+	}
+	bs := getBootServices()
+	if bs == 0 {
+		return ErrNoBootServices
+	}
+	status := efiCall(
+		bs+efiBSDisconnectController,
+		uint64(controllerHandle),
+		0, // DriverImageHandle = NULL → disconnect ALL drivers
+		0, // ChildHandle = NULL → no child filter
+		0,
+		0,
+		0,
+	)
+	// EFI_NOT_FOUND (0x...0e) is acceptable: means no driver was bound
+	// to begin with. Surface only the genuinely-bad errors.
+	if status != efiSuccess && status != efiNotFound {
+		return &EFIError{Status: status, Op: "DisconnectController"}
 	}
 	return nil
 }

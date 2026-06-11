@@ -114,6 +114,16 @@ func runOCIDOOMBootProbe() {
 	}
 	println("phase3-oci-doom-boot: scanned", len(handles), "PCI handles")
 
+	// R-doom1a (2026-06-11): pre-detach EDK2 OvmfPkg's auto-bound drivers
+	// from every virtio handle BEFORE we try to OpenProtocol(PCI_IO) on
+	// it. EDK2's VirtioGpuDxe (and possibly VirtioSerialDxe / others)
+	// BindingStarts BY_DRIVER at DXE phase, taking exclusive control;
+	// OpenProtocol would otherwise block waiting for the firmware driver
+	// to release. Disconnect-all (DriverImageHandle=NULL) gives us a
+	// clean PCI_IO surface; EFI_NOT_FOUND from an unbound handle is
+	// silently OK.
+	preDetachVirtioHandles(handles)
+
 	gpuPCI, sndPCI, inPCI := findVirtioDOOMDevices(handles)
 
 	gpuAdapter := openGPU(gpuPCI)
@@ -145,6 +155,33 @@ func runOCIDOOMBootProbe() {
 // returns the first match for virtio-gpu, virtio-sound, and
 // virtio-input. Missing devices come back as 0; the caller surfaces a
 // warning + runs the engine with the corresponding adapter nil.
+// preDetachVirtioHandles iterates the LocateHandleBuffer result and
+// calls gBS->DisconnectController(handle, NULL, NULL) on every PCI
+// handle whose VendorID = 0x1AF4 (Virtio). This frees the PCI_IO
+// protocol for our subsequent OpenProtocol calls, even when EDK2 has
+// already auto-bound a firmware driver (e.g., VirtioGpuDxe). Errors
+// are logged but do not abort the probe — DOOM may still run headless
+// if a specific device's detach fails.
+func preDetachVirtioHandles(handles []uint64) {
+	detached := 0
+	for _, h := range handles {
+		iface, err := uefiboard.HandleProtocol(h, &uefiboard.EFIPciIOProtocolGUID)
+		if err != nil {
+			continue
+		}
+		vid, err := uefiboard.PciIOReadConfigU16(iface, uefiboard.PCICfgVendorID)
+		if err != nil || vid != uefiboard.VirtioPCIVendorID {
+			continue
+		}
+		if derr := uefiboard.DisconnectController(uintptr(h)); derr != nil {
+			println("phase3-oci-doom-boot: DisconnectController FAILED on virtio handle:", derr.Error())
+			continue
+		}
+		detached++
+	}
+	println("phase3-oci-doom-boot: pre-detached virtio handles =", uint64(detached))
+}
+
 func findVirtioDOOMDevices(handles []uint64) (gpuPCI, sndPCI, inPCI uint64) {
 	for _, h := range handles {
 		iface, err := uefiboard.HandleProtocol(h, &uefiboard.EFIPciIOProtocolGUID)
