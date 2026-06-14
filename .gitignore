@@ -19,3 +19,12 @@ startup.nsh
 ufs2-fresh.img
 *.ufs.img
 /internal/livefreebsdboot/genufs/verify/verify
+# init-src build artifacts: per-arch static ELF /init binaries + stage dirs
+# (the cpio.gz that gets embedded IS committed; the loose ELF + stage tree
+# are rebuildable via internal/embed_initramfs/init_src/build.sh)
+internal/embed_initramfs/init_src/init.*
+internal/embed_initramfs/init_src/root_*/
+# Test runner output binaries
+/internal/livefreebsdboot/buildespimg/buildespimg
+# Sibling worktree from sprint 1.1 (R-amd64f isolation); never committed
+/tamago-uefi
