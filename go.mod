@@ -7,7 +7,7 @@ require (
 	github.com/go-filesystems/interface v0.0.0
 	github.com/go-filesystems/ufs v0.0.0
 	github.com/go-tpm2/common v0.1.0
-	github.com/go-tpm2/efitcg2 v0.1.1
+	github.com/go-tpm2/efitcg2 v0.2.0
 	github.com/go-tpm2/tpm2 v0.5.0
 	github.com/go-virtio/common v0.1.5
 	github.com/go-virtio/console v0.1.0
@@ -26,6 +26,7 @@ require (
 require (
 	github.com/agext/levenshtein v1.2.1 // indirect
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
+	github.com/go-tpm2/attest v0.2.2
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/zclconf/go-cty v1.16.3 // indirect

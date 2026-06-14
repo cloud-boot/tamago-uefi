@@ -50,7 +50,7 @@
 // describe; this file is where they get exercised against real OVMF
 // firmware.
 
-//go:build phase2_tpm_measure && tamago && (amd64 || arm64 || loong64 || riscv64)
+//go:build (phase2_tpm_measure || phase2_tpm_eventlog) && tamago && (amd64 || arm64 || loong64 || riscv64)
 
 package uefiboard
 
@@ -251,6 +251,179 @@ func (c tcg2Caller) GetCapability() (uint32, error) {
 	maxResp := uint32(buf[tcg2CapMaxResponseOffset]) |
 		uint32(buf[tcg2CapMaxResponseOffset+1])<<8
 	return maxResp, nil
+}
+
+// GetEventLog drives EFI_TCG2_PROTOCOL.GetEventLog (index 1) and assembles
+// the firmware's TCG event log into a byte slice. It implements
+// efitcg2.EventLogCaller (the optional extension efitcg2 type-asserts), so
+// efitcg2.GetEventLog can hand the bytes to attest.ParseEventLog +
+// ReplayPCRs.
+//
+//	EFI_STATUS GetEventLog(
+//	    IN  EFI_TCG2_PROTOCOL          *This,
+//	    IN  EFI_TCG2_EVENT_LOG_FORMAT   EventLogFormat,      // UINT32
+//	    OUT EFI_PHYSICAL_ADDRESS       *EventLogLocation,    // UINT64*
+//	    OUT EFI_PHYSICAL_ADDRESS       *EventLogLastEntry,   // UINT64*
+//	    OUT BOOLEAN                    *EventLogTruncated );  // UINT8*
+//
+// TCG "EFI Protocol Specification, Family 2.0",
+// "EFI_TCG2_PROTOCOL.GetEventLog()". EFI_PHYSICAL_ADDRESS is a UINT64 (UEFI
+// spec, "Common UEFI Data Types"), so the two location out-params are written
+// as 8-byte values and BOOLEAN as a single byte (UEFI spec: BOOLEAN is a
+// UINT8, 0 = FALSE, 1 = TRUE).
+//
+// The protocol returns ADDRESSES, not bytes: EventLogLocation is the firmware-
+// memory address of the log's FIRST entry and EventLogLastEntry the address of
+// its LAST entry (NOT one-past-the-end). To get the full log this method
+// computes the byte range
+//
+//	[location, lastEntry + sizeofEntry(lastEntry))
+//
+// by parsing the TCG_PCR_EVENT2 header at lastEntry to measure that final
+// entry, then reads the range out of identity-mapped firmware memory (this
+// loader runs pre-ExitBootServices with firmware memory directly addressable;
+// see alloc_pages.go). The empty-log cases — location == 0 (no log), or
+// lastEntry == location with only the legacy spec-ID header — are handled:
+// the header itself is sized as a legacy TCG_PCR_EVENT so the returned range
+// always covers exactly the recorded entries.
+//
+// A non-success EFI_STATUS is mapped through efitcg2's status handling by
+// returning (nil, false, an *EFIError); efitcg2 surfaces it as the call error.
+func (c tcg2Caller) GetEventLog(format uint32) (log []byte, truncated bool, err error) {
+	var location uint64  // EFI_PHYSICAL_ADDRESS EventLogLocation
+	var lastEntry uint64 // EFI_PHYSICAL_ADDRESS EventLogLastEntry
+	var truncatedB uint8 // BOOLEAN EventLogTruncated
+
+	status := efiCall(
+		c.slot(tcg2MethodGetEventLog),
+		c.proto, // This
+		uint64(format),
+		uint64(uintptr(unsafe.Pointer(&location))),
+		uint64(uintptr(unsafe.Pointer(&lastEntry))),
+		uint64(uintptr(unsafe.Pointer(&truncatedB))),
+		0,
+	)
+	if status&efiStatusErrorBit != 0 {
+		return nil, false, &EFIError{Status: status, Op: "EFI_TCG2_PROTOCOL.GetEventLog"}
+	}
+	truncated = truncatedB != 0
+
+	// Empty log: firmware reports no event-log area. Return an empty (nil)
+	// log; efitcg2 treats that as a valid no-measurements result.
+	if location == 0 {
+		return nil, truncated, nil
+	}
+
+	// Total log byte length = (lastEntry - location) + sizeofEntry(lastEntry).
+	// lastEntry points AT the last record, so its own size must be added.
+	lastSize, perr := tcg2EntrySize(location, lastEntry)
+	if perr != nil {
+		return nil, truncated, perr
+	}
+	total := (lastEntry - location) + lastSize
+	log = readFirmwareBytes(location, int(total))
+	return log, truncated, nil
+}
+
+// tcg2EntrySize returns the on-wire byte size of the event-log entry that
+// starts at firmware address entry. The FIRST entry (entry == location) is the
+// legacy TCG_PCR_EVENT spec-ID header; every other entry is a crypto-agile
+// TCG_PCR_EVENT2. Both layouts are parsed by reading the relevant header fields
+// out of firmware memory.
+//
+//	TCG_PCR_EVENT (legacy header), TCG PFP clause 9.4.5.1 / 10.2.1:
+//	    PCRIndex   UINT32
+//	    EventType  UINT32
+//	    Digest     UINT8[20]   (SHA-1)
+//	    EventSize  UINT32
+//	    Event      UINT8[EventSize]
+//	=> size = 4 + 4 + 20 + 4 + EventSize = 32 + EventSize
+//
+//	TCG_PCR_EVENT2 (crypto-agile), TCG PFP clause 10.2.1:
+//	    PCRIndex   UINT32
+//	    EventType  UINT32
+//	    Digests    TPML_DIGEST_VALUES { Count UINT32, [Count] TPMT_HA{ AlgId UINT16, Digest UINT8[algSize] } }
+//	    EventSize  UINT32
+//	    Event      UINT8[EventSize]
+//
+// The event log on the wire is LITTLE-ENDIAN (TCG PFP, "the event log uses
+// little-endian"), unlike the big-endian TPM 2.0 command stream. perr is
+// non-nil only on an unknown digest algorithm (a malformed log the firmware
+// should never produce), surfaced so the validation walls loudly rather than
+// reading a wrong range.
+func tcg2EntrySize(location, entry uint64) (uint64, error) {
+	if entry == location {
+		// Legacy TCG_PCR_EVENT header (PCRIndex 4 + EventType 4 + SHA-1 digest
+		// 20 = 28-byte fixed prefix): EventSize is the UINT32 at offset 28, and
+		// the entry size is 28 + 4 (EventSize) + EventSize.
+		const legacyPrefix = 4 + 4 + 20 // PCRIndex, EventType, SHA-1 digest
+		eventSize := readFirmwareU32LE(entry + legacyPrefix)
+		return legacyPrefix + 4 + uint64(eventSize), nil
+	}
+	// Crypto-agile TCG_PCR_EVENT2. Walk the variable-length digest list.
+	off := entry + 8 // skip PCRIndex(4) + EventType(4)
+	count := readFirmwareU32LE(off)
+	off += 4
+	for i := uint32(0); i < count; i++ {
+		algID := readFirmwareU16LE(off)
+		off += 2
+		ds, ok := tcg2DigestSize(algID)
+		if !ok {
+			return 0, &EFIError{Status: efiStatusErrorBit | 0x02, Op: "tcg2EntrySize: unknown digest alg"} // EFI_INVALID_PARAMETER
+		}
+		off += uint64(ds)
+	}
+	eventSize := readFirmwareU32LE(off)
+	off += 4
+	off += uint64(eventSize)
+	return off - entry, nil
+}
+
+// tcg2DigestSize returns the digest byte width for a TPM_ALG_ID, for the hash
+// algorithms a firmware TPM event log uses. TCG "Algorithm Registry",
+// TPM_ALG_*; widths per FIPS 180-4 / FIPS 202.
+func tcg2DigestSize(algID uint16) (int, bool) {
+	switch algID {
+	case 0x0004: // TPM_ALG_SHA1
+		return 20, true
+	case 0x000B: // TPM_ALG_SHA256
+		return 32, true
+	case 0x000C: // TPM_ALG_SHA384
+		return 48, true
+	case 0x000D: // TPM_ALG_SHA512
+		return 64, true
+	case 0x0012: // TPM_ALG_SM3_256
+		return 32, true
+	default:
+		return 0, false
+	}
+}
+
+// readFirmwareBytes copies n bytes from identity-mapped firmware memory at
+// physical address addr into a fresh Go slice. The loader runs pre-
+// ExitBootServices where firmware memory is directly addressable on every
+// supported 64-bit target (see alloc_pages.go).
+func readFirmwareBytes(addr uint64, n int) []byte {
+	if n <= 0 {
+		return nil
+	}
+	src := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(addr))), n)
+	out := make([]byte, n)
+	copy(out, src)
+	return out
+}
+
+// readFirmwareU16LE / readFirmwareU32LE read a little-endian integer from
+// firmware memory at physical address addr. The event log is little-endian
+// (TCG PFP, "Event Logging").
+func readFirmwareU16LE(addr uint64) uint16 {
+	b := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(addr))), 2)
+	return uint16(b[0]) | uint16(b[1])<<8
+}
+
+func readFirmwareU32LE(addr uint64) uint32 {
+	b := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(addr))), 4)
+	return uint32(b[0]) | uint32(b[1])<<8 | uint32(b[2])<<16 | uint32(b[3])<<24
 }
 
 // LocateTCG2 returns the firmware's EFI_TCG2_PROTOCOL interface pointer

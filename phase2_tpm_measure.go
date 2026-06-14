@@ -93,5 +93,12 @@ func measurePhase2(vmlinuz []byte, cmdline string) {
 	// SubmitCommand) so the run log carries on-device proof the extend
 	// landed. This exercises the SubmitCommand vtable slot (index 3) in
 	// addition to HashLogExtendEvent (index 2).
-	readBackPCR4(tcg2)
+	fwPCR4 := readBackPCR4(tcg2)
+
+	// Fetch the FIRMWARE's TCG event log via EFI_TCG2_PROTOCOL.GetEventLog
+	// (vtable index 1), replay it with go-tpm2/attest, and assert the
+	// replayed PCR4 == the firmware's actual PCR4 just read back. This is
+	// the full real-firmware attestation loop: it proves the FIRMWARE log
+	// (not a node-built one) reproduces the real PCRs.
+	validateFirmwareEventLog(tcg2, fwPCR4)
 }

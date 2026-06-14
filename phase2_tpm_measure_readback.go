@@ -23,22 +23,25 @@ import (
 )
 
 // readBackPCR4 issues TPM2_PCR_Read for PCR 4 in the SHA-256 bank over
-// the efitcg2 transport and prints the digest as hex. Best-effort:
-// failures are logged, never fatal.
-func readBackPCR4(t *efitcg2.TCG2) {
+// the efitcg2 transport, prints the digest as hex, and returns it (nil
+// on failure). Best-effort: failures are logged, never fatal. The
+// returned digest is the FIRMWARE's actual PCR4, which the event-log
+// replay step (phase2_tpm_measure_eventlog.go) asserts against.
+func readBackPCR4(t *efitcg2.TCG2) []byte {
 	dev := tpm2.New(t)
 	_, digests, err := dev.PCRRead([]tpm2.PCRSelection{
 		{Hash: uint16(common.AlgSHA256), PCRs: []int{int(pcrKernelImage)}},
 	})
 	if err != nil {
 		println("phase2-tpm-measure: PCRRead(PCR4) over efitcg2 FAILED:", err.Error())
-		return
+		return nil
 	}
 	if len(digests) == 0 {
 		println("phase2-tpm-measure: PCRRead(PCR4) returned no digest")
-		return
+		return nil
 	}
 	println("phase2-tpm-measure: PCR4 readback (SHA-256) =", hexBytesTPM(digests[0]))
+	return digests[0]
 }
 
 // hexBytesTPM renders a byte slice as lowercase hex without importing

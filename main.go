@@ -49,6 +49,16 @@ func main() {
 	// phase2_probe_stub.go and Phase 1 behaviour is preserved exactly.
 	runPhase2Probe()
 
+	// Phase-2 firmware event-log validation — opt-in via
+	// `-tags phase2_tpm_eventlog`. Self-contained (no OCI/network): it
+	// locates EFI_TCG2_PROTOCOL, extends a synthetic measurement into PCR4
+	// via HashLogExtendEvent, fetches the FIRMWARE event log via
+	// EFI_TCG2_PROTOCOL.GetEventLog, replays it with go-tpm2/attest, and
+	// asserts the replay matches the firmware's PCR4. When NOT built with
+	// the tag, runTPMEventLogProbe is the no-op stub and behaviour is
+	// preserved exactly.
+	runTPMEventLogProbe()
+
 	println("DONE — halting")
 	for {
 		// spin; nothing to exit to yet.
