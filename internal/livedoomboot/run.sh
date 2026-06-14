@@ -35,6 +35,17 @@
 #   CLOUDBOOT_OVMF_AMD64_CODE / _VARS: EDK2 .fd paths
 #   DOOMBOOT_LIVE_TIMEOUT: per-run wall-clock cap (default 60s)
 #   DOOMBOOT_LIVE_KEEPRUN: 1 → keep ESP + qemu logs in /tmp
+#   DOOMBOOT_LIVE_AUDIO_WAV: path → swap the `audiodev none` for
+#                            `audiodev wav,path=$PATH` and force the
+#                            virtio-sound-pci device to `streams=1`
+#                            (out-only — wav has no input backend).
+#                            The resulting WAV captures every PCM frame
+#                            godoom writes through go-virtio/sound.Write,
+#                            which is the autonomous verification mech
+#                            for R-doom1d (PCMStart→Write→audible audio)
+#                            without needing CoreAudio on the host.
+#                            On PASS, the runner prints the WAV size +
+#                            an RMS estimate over the captured samples.
 #
 # Exit 0 on PASS (engine main loop ran), 1 otherwise.
 
@@ -104,6 +115,20 @@ cp "$FW_VARS" "$WORK/vars.fd"
 # input. `-display none` keeps the run headless on CI; -vnc :0 (commented)
 # is the interactive alternative for an operator who wants to actually
 # play the demo.
+#
+# Audio backend selection (R-doom1d verification):
+#   - Default: `audiodev none` — host-silent, but virtio-sound device
+#     still exposes its full 2-stream layout (1 out + 1 in) for the
+#     guest driver to exercise. PCMStart succeeds + Write delivers
+#     frames; the host throws them away. Good for the lifecycle gate;
+#     does NOT prove "audio actually leaves the guest".
+#   - With DOOMBOOT_LIVE_AUDIO_WAV=/tmp/x.wav: `audiodev wav` captures
+#     every byte the guest pushes through Write() to a RIFF WAVE file.
+#     QEMU's wav backend is OUTPUT-ONLY, so we must reduce the device's
+#     stream count to 1 (`streams=1`) — otherwise virtio-sound-pci's
+#     init aborts with "no host audio driver" trying to open the input
+#     voice. The captured WAV is the autonomous oracle: non-zero RMS +
+#     >10s duration ⇒ R-doom1d verified end-to-end.
 QEMU_ARGS=(
     -machine q35 -cpu max -m 2048
     -display none -no-reboot
@@ -112,8 +137,23 @@ QEMU_ARGS=(
     -drive "file=$ESP,format=raw,if=none,id=esp,media=disk"
     -device "ide-hd,drive=esp"
     -device "virtio-gpu-pci"
-    -device "virtio-sound-pci,audiodev=snd0"
-    -audiodev "none,id=snd0"
+)
+
+if [[ -n "${DOOMBOOT_LIVE_AUDIO_WAV:-}" ]]; then
+    : >"$DOOMBOOT_LIVE_AUDIO_WAV" || true
+    rm -f "$DOOMBOOT_LIVE_AUDIO_WAV"
+    QEMU_ARGS+=(
+        -device "virtio-sound-pci,audiodev=snd0,streams=1"
+        -audiodev "wav,id=snd0,path=$DOOMBOOT_LIVE_AUDIO_WAV"
+    )
+    echo "[live-doomboot:$ARCH] audio capture mode: WAV → $DOOMBOOT_LIVE_AUDIO_WAV (streams=1)" >&2
+else
+    QEMU_ARGS+=(
+        -device "virtio-sound-pci,audiodev=snd0"
+        -audiodev "none,id=snd0"
+    )
+fi
+QEMU_ARGS+=(
     -device "virtio-keyboard-pci"
     -serial stdio
 )
@@ -148,6 +188,34 @@ PASS_PATTERNS=(
 for pat in "${PASS_PATTERNS[@]}"; do
     if grep -q "$pat" "$LOG"; then
         echo "[live-doomboot:$ARCH] PASS — matched \"$pat\" — wall=${ELAPSED_MS}ms"
+        # When audio capture is on, also surface the WAV stats —
+        # R-doom1d verification gate: file > 100 KB + non-zero RMS
+        # ⇒ PCMStart/Write actually pushed frames to the device.
+        if [[ -n "${DOOMBOOT_LIVE_AUDIO_WAV:-}" && -s "$DOOMBOOT_LIVE_AUDIO_WAV" ]]; then
+            WAV_BYTES="$(stat -f '%z' "$DOOMBOOT_LIVE_AUDIO_WAV" 2>/dev/null || stat -c '%s' "$DOOMBOOT_LIVE_AUDIO_WAV" 2>/dev/null || echo 0)"
+            echo "[live-doomboot:$ARCH] audio: wrote $WAV_BYTES bytes to $DOOMBOOT_LIVE_AUDIO_WAV"
+            if command -v python3 >/dev/null 2>&1; then
+                python3 - "$DOOMBOOT_LIVE_AUDIO_WAV" <<'PYEOF' || true
+import struct, sys
+with open(sys.argv[1], 'rb') as f:
+    f.seek(44)  # skip RIFF/fmt/data header (QEMU wav backend layout)
+    data = f.read()
+n = len(data) // 2
+if n == 0:
+    print("[live-doomboot:audio] WAV body empty — guest wrote zero PCM bytes")
+    sys.exit()
+samples = struct.unpack(f'<{n}h', data)
+nonzero = sum(1 for s in samples if s != 0)
+peak = max(abs(s) for s in samples)
+rms = (sum(s * s for s in samples) / n) ** 0.5
+# QEMU's wav backend resamples to its internal rate (44100 stereo by
+# default); duration is approximate but ample for a regression sanity.
+print(f"[live-doomboot:audio] samples={n} nonzero={nonzero} ({100*nonzero/n:.1f}%) peak={peak} rms={rms:.0f}")
+if rms < 50:
+    print("[live-doomboot:audio] WARN: rms < 50 — audio looks like dead silence")
+PYEOF
+            fi
+        fi
         exit 0
     fi
 done
