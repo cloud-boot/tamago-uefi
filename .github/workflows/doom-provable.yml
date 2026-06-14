@@ -10,11 +10,18 @@
 # WAD, or any determinism hook regresses, the SHAs diverge and CI fails
 # the build with a precise per-checkpoint diff.
 #
-# GATE B (guest virtio-gpu histogram vs guest oracle) requires building
-# the EFI probe + booting it under QEMU+EDK2 with QMP capture. That's
-# heavier than a runner job (TamaGo cross-compile + 128 MiB ESP + OVMF)
-# and is currently exercised manually + on the maintainer's workstation;
-# wiring it into GHA is queued as a follow-up.
+# GATE C-1 (host-side audio-event byte-equal re-harvest, R-doom1h) is
+# also wired into this workflow — it adds <2 s to the gate-a job because
+# it re-runs the same harvest in -verify-audio-log mode against the
+# committed oracle/audio_log.json.
+#
+# GATE B (guest virtio-gpu histogram vs guest oracle) and GATE C-2
+# (guest WAV bounded-tolerance vs oracle/reference.wav) both require
+# building the EFI probe + booting it under QEMU+EDK2 with QMP capture
+# and -audiodev wav. That's heavier than a runner job (TamaGo
+# cross-compile + 128 MiB ESP + OVMF + ~5 MiB WAV per checkpoint) and
+# is currently exercised manually + on the maintainer's workstation;
+# wiring those into GHA is queued as a follow-up.
 
 name: doom-provable
 
@@ -41,7 +48,7 @@ permissions:
 
 jobs:
   gate-a:
-    name: GATE A — engine-determinism byte-equal re-harvest
+    name: GATE A + GATE C-1 — engine + audio-event byte-equal re-harvest
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tamago-uefi
@@ -119,6 +126,30 @@ jobs:
           fi
           echo "::notice::GATE A PASS — engine deterministic, all checkpoints byte-equal"
 
+      - name: GATE C-1 — host audio-event byte-equal re-harvest
+        if: env.SKIP_GATE_A != '1'
+        run: |
+          set -euo pipefail
+          cd godoom
+          if [ ! -f oracle/audio_log.json ]; then
+              echo "::warning::no oracle/audio_log.json — skipping GATE C-1 (regenerate with harvest-reference)"
+              exit 0
+          fi
+          CHECKPOINTS="$(python3 -c "import json; print(','.join(str(c['tic']) for c in json.load(open('oracle/manifest.json'))['checkpoints']))")"
+          SEED="$(python3 -c "import json; print(json.load(open('oracle/manifest.json'))['seed'])")"
+          mkdir -p /tmp/audio-verify-out
+          if GOWORK=off go run ./cmd/harvest-reference \
+              -wad embedwad/doom1.wad \
+              -seed "$SEED" \
+              -checkpoints "$CHECKPOINTS" \
+              -out /tmp/audio-verify-out \
+              -verify-audio-log oracle/audio_log.json; then
+              echo "::notice::GATE C-1 PASS — audio event stream byte-equal vs oracle/audio_log.json"
+          else
+              echo "::error::GATE C-1 FAIL — audio event stream diverges (host-side determinism regression)"
+              exit 1
+          fi
+
       - name: Upload divergence artifacts (on failure)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -141,11 +172,12 @@ jobs:
         with:
           go-version: '1.26.x'
 
-      - name: go test seed + frontend + harvest
+      - name: go test seed + frontend + audiolog + harvest
         run: |
           set -euo pipefail
           cd godoom
           GOWORK=off go test -count=1 \
             -run '^TestSeed|^TestSetDet|^TestReset|^TestRandom' ./
           GOWORK=off go test -count=1 ./backend/tamago/
+          GOWORK=off go test -count=1 ./backend/audiolog/
           GOWORK=off go test -count=1 ./cmd/harvest-reference/

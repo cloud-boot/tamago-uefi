@@ -13,13 +13,20 @@
 #     framebuffer at tic Ti MUST hash to H(Ti)". Either it matches or
 #     it does NOT — there is no judgement call.
 #
-# Two verification gates, both byte-equal SHA-256:
+# Four verification gates:
 #
 #  GATE A (engine-determinism, ALREADY PROVED by harvest-reference):
 #    Same WAD + same seed + same script ⇒ identical PPMs from gore.Run.
 #    This is checked by `cloud-boot/godoom/cmd/harvest-reference` and
 #    re-validated in this script's pre-flight by re-running the harvest
 #    and diffing against the committed oracle/ directory.
+#
+#  GATE C-1 (host-side audio-event determinism, byte-equal — R-doom1h):
+#    Re-run harvest-reference with -verify-audio-log against
+#    oracle/audio_log.json. Same engine + seed ⇒ identical sequence of
+#    CacheSound + PlaySound calls. Catches any audio-related drift in
+#    p_random consumers (monster pain chance, weapon fire spread) BEFORE
+#    a frame ever renders.
 #
 #  GATE B (guest-stack determinism, BOUNDED TOLERANCE):
 #    The bare-metal probe inside QEMU+EDK2 is wall-clock driven (TamaGo
@@ -44,7 +51,9 @@
 #   GUEST_FRAME_HASH (QMP):        NOT achievable (would require pausing
 #                                  the VM at a precise tic boundary +
 #                                  TamaGo determinism work)
-#   AUDIO_BYTES:                   EMPIRICAL (no oracle yet — follow-up)
+#   AUDIO_EVENT_STREAM (host):     BYTE-EQUAL provable (GATE C-1, R-doom1h)
+#   GUEST_AUDIO_WAV:               BOUNDED-TOLERANCE provable (GATE C-2,
+#                                  per-second RMS envelope ±6 dB / ≥95%)
 #
 # This script implements all three currently-attainable gates and reports
 # each independently. CI fails the build on any gate FAIL.
@@ -72,7 +81,7 @@ ORACLE_DIR="$GODOOM_DIR/oracle"
 GUEST_ORACLE_DIR="$REPO_DIR/internal/livedoomboot/guest_oracle"
 TIMEOUT_SECONDS="${DOOMBOOT_LIVE_TIMEOUT:-120}"
 SEED="${DOOMBOOT_PROVABLE_SEED:-0}"
-CHECKPOINTS="${DOOMBOOT_PROVABLE_CHECKPOINTS:-35,70,140,350,1050}"
+CHECKPOINTS="${DOOMBOOT_PROVABLE_CHECKPOINTS:-1,35,70,140,350,1050}"
 
 EFI_NAME="BOOTX64-DOOMBOOT.EFI"
 EFI_BOOT_NAME="BOOTX64.EFI"
@@ -156,6 +165,37 @@ else
     GATE_RESULTS+=("A:PASS")
 fi
 
+# ---- GATE C-1: host-side audio event stream byte-equal re-harvest ----------
+#
+# Re-runs harvest-reference in verify mode against the committed
+# oracle/audio_log.json. Same engine + WAD + seed MUST produce a
+# byte-identical sequence of CacheSound + PlaySound calls. This catches
+# any drift in p_random consumers (monster AI, weapon spread, gore
+# sound channel selection) BEFORE the framebuffer renders.
+
+echo "[provable_test] === GATE C-1: host-side audio-event byte-equal re-harvest ===" >&2
+if [[ ! -f "$ORACLE_DIR/audio_log.json" ]]; then
+    echo "GATE C-1: SKIPPED — no $ORACLE_DIR/audio_log.json (regenerate with harvest-reference)" >&2
+    GATE_RESULTS+=("C1:SKIP")
+else
+    AUDIO_VERIFY_OUT="$WORK/host_audio_verify"
+    mkdir -p "$AUDIO_VERIFY_OUT"
+    if ( cd "$GODOOM_DIR" && GOWORK=off go run ./cmd/harvest-reference \
+            -wad embedwad/doom1.wad \
+            -seed "$SEED" \
+            -checkpoints "$CHECKPOINTS" \
+            -out "$AUDIO_VERIFY_OUT" \
+            -verify-audio-log oracle/audio_log.json ) >"$WORK/audio_verify.log" 2>&1; then
+        tail -3 "$WORK/audio_verify.log" >&2
+        echo "GATE C-1: PASS — audio event stream byte-equal vs oracle/audio_log.json" >&2
+        GATE_RESULTS+=("C1:PASS")
+    else
+        tail -10 "$WORK/audio_verify.log" >&2
+        echo "GATE C-1: FAIL — audio event stream diverges from oracle/audio_log.json" >&2
+        GATE_RESULTS+=("C1:FAIL")
+    fi
+fi
+
 # ---- GATE B: guest-stack histogram against guest oracle --------------------
 
 if [[ ! -d "$GUEST_ORACLE_DIR" || ! -f "$GUEST_ORACLE_DIR/manifest.json" ]]; then
@@ -203,6 +243,22 @@ cp "$FW_VARS" "$vars"
 
 QMP_SOCK="$SOCK_DIR/q.sock"
 SERIAL_LOG="$WORK/serial.log"
+CAPTURED_WAV="$WORK/capture.wav"
+# R-doom1h: when the committed reference WAV is present, swap the
+# null audiodev for a wav-capturing one so GATE C-2 can compare against
+# it. The wav backend is OUTPUT-ONLY (no input voice), hence streams=1.
+REFERENCE_WAV="$ORACLE_DIR/reference.wav"
+if [[ -f "$REFERENCE_WAV" ]]; then
+    AUDIO_ARGS=(
+        -device "virtio-sound-pci,audiodev=snd0,streams=1"
+        -audiodev "wav,id=snd0,path=$CAPTURED_WAV"
+    )
+else
+    AUDIO_ARGS=(
+        -device "virtio-sound-pci,audiodev=snd0"
+        -audiodev "none,id=snd0"
+    )
+fi
 QEMU_ARGS=(
     -machine q35 -cpu max -m 2048
     -display none -no-reboot -vga none
@@ -211,8 +267,7 @@ QEMU_ARGS=(
     -drive "file=$ESP,format=raw,if=none,id=esp,media=disk"
     -device "ide-hd,drive=esp"
     -device "virtio-gpu-pci"
-    -device "virtio-sound-pci,audiodev=snd0"
-    -audiodev "none,id=snd0"
+    "${AUDIO_ARGS[@]}"
     -device "virtio-keyboard-pci"
     -serial "file:$SERIAL_LOG"
     -qmp "unix:$QMP_SOCK,server=on,wait=off"
@@ -392,6 +447,43 @@ PYEOF
     else
         echo "GATE B: FAIL — guest-stack histograms exceed tolerance" >&2
         GATE_RESULTS+=("B:FAIL")
+    fi
+fi
+
+# ---- GATE C-2: guest WAV bounded-tolerance vs reference WAV ----------------
+#
+# Bounded-tolerance audio gate (R-doom1h). Compares the WAV captured by
+# QEMU's -audiodev wav backend against oracle/reference.wav. Metric:
+# per-second RMS envelope within ±6 dB for ≥95% of windows. See
+# audio_verify.py header for the design justification.
+
+if [[ ! -f "$REFERENCE_WAV" ]]; then
+    echo "[provable_test] GATE C-2: SKIPPED — no $REFERENCE_WAV (capture one with run.sh DOOMBOOT_LIVE_AUDIO_WAV=...)" >&2
+    GATE_RESULTS+=("C2:SKIP")
+elif [[ ! -s "$CAPTURED_WAV" ]]; then
+    echo "[provable_test] GATE C-2: SKIPPED — no WAV captured (QEMU exited too early)" >&2
+    GATE_RESULTS+=("C2:SKIP")
+else
+    echo "[provable_test] === GATE C-2: guest WAV bounded-tolerance vs reference.wav ===" >&2
+    AV_TOL_DB="${DOOMBOOT_AUDIO_TOL_DB:-6.0}"
+    AV_MIN_RATIO="${DOOMBOOT_AUDIO_MIN_RATIO:-0.95}"
+    AV_WINDOW_S="${DOOMBOOT_AUDIO_WINDOW_S:-1.0}"
+    if python3 "$REPO_DIR/internal/livedoomboot/audio_verify.py" \
+            --reference "$REFERENCE_WAV" \
+            --capture "$CAPTURED_WAV" \
+            --tolerance-db "$AV_TOL_DB" \
+            --min-ratio "$AV_MIN_RATIO" \
+            --window-seconds "$AV_WINDOW_S" >&2; then
+        GATE_RESULTS+=("C2:PASS")
+    else
+        RC=$?
+        if [[ $RC -eq 2 ]]; then
+            echo "GATE C-2: ERROR — audio_verify.py rejected the inputs" >&2
+            GATE_RESULTS+=("C2:FAIL")
+        else
+            echo "GATE C-2: FAIL — guest WAV envelope diverges from reference.wav" >&2
+            GATE_RESULTS+=("C2:FAIL")
+        fi
     fi
 fi
 
