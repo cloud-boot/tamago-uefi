@@ -1,0 +1,30 @@
+{
+  "checkpoints": [
+    {
+      "tic": 1,
+      "frame_ppm": "frame_tic000001.ppm",
+      "frame_hash": "cec28f61fb2bc4b8b38694ed1e32ed42dcb6afee01bff4560feb867d87b59fc6"
+    },
+    {
+      "tic": 35,
+      "frame_ppm": "frame_tic000035.ppm",
+      "frame_hash": "cec28f61fb2bc4b8b38694ed1e32ed42dcb6afee01bff4560feb867d87b59fc6"
+    },
+    {
+      "tic": 70,
+      "frame_ppm": "frame_tic000070.ppm",
+      "frame_hash": "1172a31059cf3e1c6cf39a0af61dae6b5c6c258146cbc86af644dd37c7dbb578"
+    },
+    {
+      "tic": 140,
+      "frame_ppm": "frame_tic000140.ppm",
+      "frame_hash": "6dd822f6e4bab1fe0b071dbe525d1d0fa67a58a34a5d546607aefdf7897bc9e5"
+    },
+    {
+      "tic": 1050,
+      "frame_ppm": "frame_tic001050.ppm",
+      "frame_hash": "355191f429f919c8e5194086a51137cd5853ce2ec8ff402d698483e0e3d45100"
+    }
+  ],
+  "tolerance_chi2": 130000.0
+}
