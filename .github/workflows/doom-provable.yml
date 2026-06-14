@@ -1,0 +1,151 @@
+# Copyright (c) 2026 cloud-boot contributors
+# SPDX-License-Identifier: BSD-3-Clause
+#
+# R-doom1g — Provable DOOM test protocol CI gate.
+#
+# This workflow runs the host-side engine-determinism gate (GATE A) on
+# every push / matching PR. GATE A is the byte-equal SHA-256 re-harvest:
+# we re-run cloud-boot/godoom/cmd/harvest-reference and diff every
+# produced PPM against the committed oracle/ directory. If the engine,
+# WAD, or any determinism hook regresses, the SHAs diverge and CI fails
+# the build with a precise per-checkpoint diff.
+#
+# GATE B (guest virtio-gpu histogram vs guest oracle) requires building
+# the EFI probe + booting it under QEMU+EDK2 with QMP capture. That's
+# heavier than a runner job (TamaGo cross-compile + 128 MiB ESP + OVMF)
+# and is currently exercised manually + on the maintainer's workstation;
+# wiring it into GHA is queued as a follow-up.
+
+name: doom-provable
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cloud-boot/godoom/**'
+      - 'godoom/**'
+      - 'phase3_oci_doom_boot.go'
+      - 'internal/livedoomboot/**'
+      - '.github/workflows/doom-provable.yml'
+  pull_request:
+    paths:
+      - 'cloud-boot/godoom/**'
+      - 'godoom/**'
+      - 'phase3_oci_doom_boot.go'
+      - 'internal/livedoomboot/**'
+      - '.github/workflows/doom-provable.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  gate-a:
+    name: GATE A — engine-determinism byte-equal re-harvest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout tamago-uefi
+        uses: actions/checkout@v4
+        with:
+          path: tamago-uefi
+
+      - name: Checkout cloud-boot/godoom (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: cloud-boot/godoom
+          path: godoom
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+
+      - name: Resolve WAD
+        # The WAD is .gitignore'd in cloud-boot/godoom (binary, ~28 MiB).
+        # CI pulls Freedoom phase-1 from the canonical release and hashes
+        # it against the value recorded in oracle/manifest.json — a
+        # WAD-bytes mismatch is treated as a soft skip, NOT a fail, so
+        # an upstream Freedoom retag doesn't gratuitously break the gate
+        # until the maintainer rolls a new oracle.
+        run: |
+          set -euo pipefail
+          cd godoom
+          if [ ! -f embedwad/doom1.wad ]; then
+            echo "::group::download Freedoom phase-1"
+            curl -fsSL -o /tmp/freedoom.zip \
+              https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip
+            unzip -p /tmp/freedoom.zip freedoom-0.13.0/freedoom1.wad > embedwad/doom1.wad
+            echo "::endgroup::"
+          fi
+          EXPECTED="$(python3 -c "import json; print(json.load(open('oracle/manifest.json'))['wad_hash'])")"
+          ACTUAL="$(sha256sum embedwad/doom1.wad | awk '{print $1}')"
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::warning::WAD SHA mismatch — oracle/manifest.json:$EXPECTED  fetched:$ACTUAL"
+            echo "::warning::skipping GATE A; maintainer must re-harvest with the new WAD"
+            echo "SKIP_GATE_A=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: GATE A — re-harvest + byte-equal diff
+        if: env.SKIP_GATE_A != '1'
+        run: |
+          set -euo pipefail
+          cd godoom
+          mkdir -p /tmp/fresh-oracle
+          # Read checkpoint list from committed manifest to stay in sync.
+          CHECKPOINTS="$(python3 -c "import json; print(','.join(str(c['tic']) for c in json.load(open('oracle/manifest.json'))['checkpoints']))")"
+          SEED="$(python3 -c "import json; print(json.load(open('oracle/manifest.json'))['seed'])")"
+          echo "Re-harvesting seed=$SEED checkpoints=$CHECKPOINTS"
+          GOWORK=off go run ./cmd/harvest-reference \
+              -wad embedwad/doom1.wad \
+              -seed "$SEED" \
+              -checkpoints "$CHECKPOINTS" \
+              -out /tmp/fresh-oracle
+          fail=0
+          for f in oracle/frame_tic*.ppm; do
+              name="$(basename "$f")"
+              a="$(sha256sum "$f" | awk '{print $1}')"
+              b="$(sha256sum "/tmp/fresh-oracle/$name" | awk '{print $1}')"
+              if [ "$a" = "$b" ]; then
+                  echo "OK  $name  sha=$a"
+              else
+                  echo "::error::GATE A FAIL $name  oracle=$a  fresh=$b"
+                  fail=1
+              fi
+          done
+          if [ "$fail" -ne 0 ]; then
+              echo "::error::GATE A FAIL — engine no longer byte-equal-reproducible"
+              exit 1
+          fi
+          echo "::notice::GATE A PASS — engine deterministic, all checkpoints byte-equal"
+
+      - name: Upload divergence artifacts (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-a-divergence
+          path: |
+            /tmp/fresh-oracle/
+            godoom/oracle/
+
+  unit-tests:
+    name: unit tests (seed.go + harvest-reference + tamago frontend)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: cloud-boot/godoom
+          path: godoom
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: go test seed + frontend + harvest
+        run: |
+          set -euo pipefail
+          cd godoom
+          GOWORK=off go test -count=1 \
+            -run '^TestSeed|^TestSetDet|^TestReset|^TestRandom' ./
+          GOWORK=off go test -count=1 ./backend/tamago/
+          GOWORK=off go test -count=1 ./cmd/harvest-reference/
