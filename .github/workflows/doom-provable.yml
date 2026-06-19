@@ -52,18 +52,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout tamago-uefi
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: tamago-uefi
 
       - name: Checkout cloud-boot/godoom (sibling)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: cloud-boot/godoom
           path: godoom
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
           cache: false
@@ -152,7 +152,7 @@ jobs:
 
       - name: Upload divergence artifacts (on failure)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gate-a-divergence
           path: |
@@ -163,12 +163,12 @@ jobs:
     name: unit tests (seed.go + harvest-reference + tamago frontend)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: cloud-boot/godoom
           path: godoom
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26.x'
 
