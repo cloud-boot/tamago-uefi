@@ -1,3 +1,5 @@
+//go:build tamago && (amd64 || arm64 || loong64 || riscv64)
+
 // Copyright 2026 The cloud-boot Authors.
 // SPDX-License-Identifier: BSD-3-Clause
 //
