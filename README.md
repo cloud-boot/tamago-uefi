@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/cloud-boot/brand/main/social/cloud-boot.png" alt="cloud-boot/tamago-uefi" width="720"></p>
+
 # cloud-boot/tamago-uefi
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cloud-boot/tamago-uefi.svg)](https://pkg.go.dev/github.com/cloud-boot/tamago-uefi)

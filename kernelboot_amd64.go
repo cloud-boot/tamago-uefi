@@ -68,7 +68,14 @@
 package main
 
 var (
-	kernelBootTargetRef = "https://ttl.sh/cloudboot-vmlinuz-amd64:24h"
+	// VALIDATION-ONLY OVERRIDE (uncommitted): "" forces MODE B (the
+	// network-free in-process self-test) so the phase2_tpm_measure build
+	// exercises efitcg2 v0.2.0's GetEventLog loop against the embedded PE
+	// payload without depending on an external ttl.sh kernel image (which
+	// has a 24h TTL and expires). Restore the ttl.sh ref for a real MODE-C
+	// kernel boot:
+	//   kernelBootTargetRef = "https://ttl.sh/cloudboot-vmlinuz-amd64:24h"
+	kernelBootTargetRef = ""
 	kernelBootCmdline   = "console=ttyS0,115200 earlyprintk=ttyS0,115200 " +
 		"keep_bootcon printk.time=y " +
 		"root=/dev/ram0 rdinit=/init initrd=\\initrd.gz " +
