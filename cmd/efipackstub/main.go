@@ -66,6 +66,8 @@ import (
 	"unsafe"
 
 	"github.com/cloud-boot/tamago-uefi/uefiboard"
+	"github.com/go-compressions/lz4"
+	"github.com/go-compressions/lzfse"
 )
 
 // EFI_LOADED_IMAGE_PROTOCOL_GUID
@@ -192,7 +194,13 @@ const fileInfoFileSize = 8
 const (
 	payloadMagic      = "CBP0"
 	payloadHeaderSize = 24
-	algoFlat          = "FLAT"
+	// Algorithm tags stamped by go-coff/efipack (payloadAlgoTag). Each
+	// is exactly four bytes on the wire; LZ4 pads to width with a
+	// trailing space. These MUST stay byte-identical to the host-side
+	// tags in go-coff/efipack/pack.go.
+	algoFlat  = "FLAT"
+	algoLZFSE = "LZFS"
+	algoLZ4   = "LZ4 "
 )
 
 // EFI memory types we may pass to AllocatePages. EfiLoaderCode is
@@ -238,7 +246,11 @@ func run() uintptr {
 	if string(payload[0:4]) != payloadMagic {
 		return efiAborted
 	}
-	if string(payload[4:8]) != algoFlat {
+	algo := string(payload[4:8])
+	switch algo {
+	case algoFlat, algoLZ4, algoLZFSE:
+		// supported
+	default:
 		return efiAborted
 	}
 	uncompressedSize := binary.LittleEndian.Uint64(payload[8:16])
@@ -258,7 +270,7 @@ func run() uintptr {
 	}
 	dst := unsafe.Slice((*byte)(unsafe.Pointer(uintptr(addr))), int(uncompressedSize))
 
-	if !flateDecode(compressed, dst) {
+	if !decodePayload(algo, compressed, dst) {
 		return efiAborted
 	}
 
@@ -550,6 +562,44 @@ var stubImageHandle uint64
 
 func myImageHandle() uintptr   { return uintptr(stubImageHandle) }
 func myImageHandleU64() uint64 { return stubImageHandle }
+
+// decodePayload decompresses the CBP0 body `compressed` into `dst`
+// (the AllocatePages EfiLoaderCode buffer, pre-sized to the header's
+// uncompressed length) according to the 4-byte wire `algo` tag.
+//
+//   - FLAT  -> compress/flate, inflated straight into dst.
+//   - LZ4   -> github.com/go-compressions/lz4 raw block codec; the
+//     CBP0 uncompressed size seeds DecompressBlock's output capacity
+//     so it never reallocates, then the result is copied into dst.
+//   - LZFS  -> github.com/go-compressions/lzfse (LZFSE); decoded then
+//     copied into dst.
+//
+// Both go-compressions codecs are the SAME pure-Go implementations
+// go-coff/efipack proves byte-exact host-side, so a stub decode is
+// guaranteed to round-trip whatever the host packer stamped. Returns
+// true iff exactly len(dst) bytes were produced.
+func decodePayload(algo string, compressed, dst []byte) bool {
+	switch algo {
+	case algoFlat:
+		return flateDecode(compressed, dst)
+	case algoLZ4:
+		out, err := lz4.DecompressBlock(compressed, len(dst))
+		if err != nil || len(out) != len(dst) {
+			return false
+		}
+		copy(dst, out)
+		return true
+	case algoLZFSE:
+		out, err := lzfse.Decompress(compressed)
+		if err != nil || len(out) != len(dst) {
+			return false
+		}
+		copy(dst, out)
+		return true
+	default:
+		return false
+	}
+}
 
 // flateDecode decompresses src (raw flate stream) into dst,
 // returning true iff exactly len(dst) bytes were produced.

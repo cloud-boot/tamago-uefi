@@ -401,6 +401,15 @@ func bootStreamedPayload(payload []byte) {
 	}
 	println("phase2-oci-kernel-boot: streamed payload PE header OK (MZ)")
 
+	// VALIDATION HOOK (build-tag phase2_tpm_measure only; no-op stub
+	// otherwise): measure the SHA-256-verified payload into the firmware
+	// TPM via EFI_TCG2_PROTOCOL before LoadImage, then fetch+replay the
+	// FIRMWARE event log. In MODE B (network-free self-test) this is the
+	// path that exercises efitcg2 v0.2.0's GetEventLog end-to-end without
+	// depending on an external (ttl.sh) kernel image. measurePhase2 is the
+	// no-op stub when the tag is off, so this line is inert in normal builds.
+	measurePhase2(payload, kernelBootCmdline)
+
 	handle, err := uefiboard.LoadImage(payload)
 	if err != nil {
 		println("phase2-oci-kernel-boot: LoadImage FAILED:", err.Error())
