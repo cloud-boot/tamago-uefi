@@ -109,63 +109,102 @@ jobs:
         run: |
           set -euo pipefail
           # Durable, self-healing replacement for the old hard-pinned
-          # `.deb` URLs. We resolve the newest kernel image .deb for
-          # this arch straight from Debian's canonical binary `Packages`
-          # index, so we never name a version that the archive can later
-          # drop (which is what produced the daily HTTP-404 failures).
+          # `.deb` URLs. We resolve the real kernel .deb for this arch at
+          # run time from Debian's canonical binary `Packages` index, so
+          # we never name a version that the archive can later drop
+          # (which is what produced the daily HTTP-404 failures).
           #
-          # Suite = `sid` (unstable): the rolling suite always carries
-          # the newest kernel for every Debian release architecture and
-          # is never frozen or removed, so its index never 404s.
+          # Suite = `sid` (unstable): the rolling suite always carries the
+          # newest kernel for every Debian release architecture and is
+          # never frozen or removed, so its index never 404s.
           #
-          # Package selection mirrors the previous hand-pinned choice
-          # exactly: the plain, versioned `linux-image-<ver>-<arch>`
-          # binary. For arm64/amd64 that binary is built from
-          # `src:linux-signed-<arch>` and its `Filename:` points at the
-          # signed pool that ships the real `/boot/vmlinuz-*` EFI-stub
-          # (the unsigned `-unsigned` template has no vmlinuz). For
-          # riscv64/loong64 there is no signed variant, so it is the
+          # IMPORTANT: the plain `linux-image-<ver>-<arch>` package is
+          # ONLY a ~15 KB metapackage (Installed-Size: 15) that has no
+          # `/boot/vmlinuz` of its own -- it merely `Depends:` on the real
+          # kernel binary. Fetching it hands the extractor an empty
+          # archive ("no /boot/vmlinuz found"). So we do two hops:
+          #
+          #   1. Find the newest `linux-image-<ver>-<arch>` metapackage and
+          #      read its `Depends:`.
+          #   2. Pull the `linux-binary-<ver>-<arch>` name out of those
+          #      Depends -- that is the package that actually ships
+          #      `/boot/vmlinuz*` (tens of MB) -- and resolve ITS
+          #      `Filename:` from the same index.
+          #
+          # For arm64/amd64 that binary is built from
+          # `src:linux-signed-<arch>` and its Filename points at the
+          # signed pool (the EFI-stub the loader expects); for
+          # riscv64/loong64 there is no signed variant so it is the
           # `src:linux` binary under `pool/main/l/linux/`. We exclude the
           # -dbg / -cloud / -rt / -16k / -unsigned variants and any
-          # experimental `~rc`/`~exp` version, then pick the highest
+          # experimental `~rc`/`~exp` version, and pick the highest
           # version with `dpkg --compare-versions`.
           BASE="https://deb.debian.org/debian"
           IDX="$BASE/dists/sid/main/binary-${ARCH}/Packages.gz"
-          echo "resolving newest linux-image for ${ARCH} from ${IDX}"
+          echo "resolving kernel image for ${ARCH} from ${IDX}"
 
-          mapfile -t cands < <(curl -fsSL --retry 5 --retry-delay 3 "$IDX" \
-            | gzip -dc \
-            | awk -v arch="$ARCH" '
-                /^Package: /  { pkg=$2 }
-                /^Version: /  { ver=$2 }
-                /^Filename: / { fn=$2 }
-                /^$/ {
-                  if (pkg ~ ("^linux-image-[0-9].*-" arch "$") &&
-                      pkg !~ /-(dbg|cloud|rt|16k|unsigned)(-|$)/ &&
-                      ver !~ /~/) {
-                    print ver "\t" fn
-                  }
-                  pkg=""; ver=""; fn=""
-                }')
-          if [ "${#cands[@]}" -eq 0 ]; then
-            echo "::error::no linux-image candidate found for ${ARCH} in sid" >&2
+          PKGS="$(mktemp)"
+          curl -fsSL --retry 5 --retry-delay 3 "$IDX" | gzip -dc > "$PKGS"
+
+          # Hop 1: newest metapackage -> its Depends line.
+          mapfile -t metas < <(awk -v arch="$ARCH" '
+              /^Package: /  { pkg=$2 }
+              /^Version: /  { ver=$2 }
+              /^Depends: /  { $1=""; dep=substr($0,2) }
+              /^$/ {
+                if (pkg ~ ("^linux-image-[0-9].*-" arch "$") &&
+                    pkg !~ /-(dbg|cloud|rt|16k|unsigned)(-|$)/ &&
+                    ver !~ /~/) {
+                  print ver "\t" dep
+                }
+                pkg=""; ver=""; dep=""
+              }' "$PKGS")
+          if [ "${#metas[@]}" -eq 0 ]; then
+            echo "::error::no linux-image metapackage found for ${ARCH} in sid" >&2
             exit 1
           fi
-
-          bestver=""; bestfn=""
-          for line in "${cands[@]}"; do
-            v="${line%%$'\t'*}"; f="${line#*$'\t'}"
+          bestver=""; bestdep=""
+          for line in "${metas[@]}"; do
+            v="${line%%$'\t'*}"; d="${line#*$'\t'}"
             if [ -z "$bestver" ] || dpkg --compare-versions "$v" gt "$bestver"; then
-              bestver="$v"; bestfn="$f"
+              bestver="$v"; bestdep="$d"
             fi
           done
 
-          URL="$BASE/$bestfn"
-          echo "resolved ${ARCH} -> ${bestver}"
+          # Hop 2: the linux-binary-<...>-<arch> dependency = real image.
+          binpkg="$(printf '%s\n' "$bestdep" | tr ',' '\n' \
+            | grep -oE "linux-binary-[^ ]*-${ARCH}" | head -1)"
+          if [ -z "$binpkg" ]; then
+            echo "::error::no linux-binary dependency in metapackage ${bestver} (${ARCH})" >&2
+            echo "Depends was: ${bestdep}" >&2
+            exit 1
+          fi
+          binfn="$(awk -v p="$binpkg" '
+              /^Package: /  { pkg=$2 }
+              /^Filename: / { fn=$2 }
+              /^$/ { if (pkg==p) { print fn; exit } ; pkg=""; fn="" }' "$PKGS")"
+          if [ -z "$binfn" ]; then
+            echo "::error::no Filename for ${binpkg} in sid ${ARCH} index" >&2
+            exit 1
+          fi
+          rm -f "$PKGS"
+
+          URL="$BASE/$binfn"
+          echo "resolved ${ARCH} metapackage ${bestver} -> image package ${binpkg}"
           echo "resolved URL -> ${URL}"
-          # Fail loudly here (not deep in the extractor) if the archive
-          # is not actually serving the resolved artifact.
-          curl -fsSL --retry 5 --retry-delay 3 -o /dev/null -I "$URL"
+
+          # Fail loudly HERE (not deep in the extractor) if the archive is
+          # not serving the artifact, and guard against ever selecting a
+          # tiny metapackage again: the real kernel image is many MB, so
+          # anything under 1 MiB is wrong. HEAD only -- the extractor
+          # downloads the body itself in the next step.
+          LEN="$(curl -fsSL --retry 5 --retry-delay 3 -I "$URL" \
+            | awk 'tolower($1)=="content-length:"{print $2}' | tr -d '\r' | tail -1)"
+          echo "resolved artifact size: ${LEN:-unknown} bytes"
+          if [ -z "${LEN:-}" ] || [ "$LEN" -lt 1048576 ]; then
+            echo "::error::resolved .deb for ${ARCH} is only ${LEN:-0} bytes (<1 MiB) -- looks like a metapackage, not a kernel image" >&2
+            exit 1
+          fi
           echo "SRC=deb:${URL}" >> "$GITHUB_ENV"
 
       - name: Republish ${{ matrix.arch }} (ttl.sh primary, ghcr.io if GHCR_TOKEN set)
