@@ -60,9 +60,9 @@
 package main
 
 import (
-	gore "github.com/cloud-boot/godoom"
-	doomback "github.com/cloud-boot/godoom/backend/tamago"
-	"github.com/cloud-boot/godoom/embedwad"
+	gore "github.com/go-doom/engine"
+	doomback "github.com/go-doom/engine/backend/tamago"
+	"github.com/go-doom/engine/embedwad"
 	"github.com/cloud-boot/tamago-uefi/uefiboard"
 	"github.com/go-virtio/gpu"
 	"github.com/go-virtio/input"
@@ -102,7 +102,7 @@ func runOCIDOOMBootProbe() {
 	if len(wad) == 0 {
 		println("phase3-oci-doom-boot: DOOMBOOT FAIL: no WAD embedded")
 		println("phase3-oci-doom-boot: rebuild with -tags embedwad after dropping doom1.wad into")
-		println("phase3-oci-doom-boot: cloud-boot/godoom/internal/embedwad/")
+		println("phase3-oci-doom-boot: go-doom/engine/internal/embedwad/")
 		return
 	}
 	println("phase3-oci-doom-boot: WAD embedded, size =", len(wad), "bytes")
