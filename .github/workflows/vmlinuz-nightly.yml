@@ -61,29 +61,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # NOTE: no hard-pinned `src:` .deb URL any more. The Debian
+        # archive drops superseded point-release kernels from the pool
+        # within weeks (deb.debian.org/.../pool/... starts returning
+        # HTTP 404), which is exactly what took this job RED. Instead
+        # the "Resolve latest kernel .deb" step below resolves the
+        # newest kernel .deb for each arch AT RUN TIME from the
+        # canonical Debian `Packages` index, so there is no version to
+        # rot. See that step for the selection rules.
         include:
           - arch: riscv64
-            src: 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-image-6.12.90+deb13.1-riscv64_6.12.90-2_riscv64.deb'
             ttl_dst: 'ttl.sh/cloudboot-vmlinuz-riscv64:24h'
             ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-riscv64:latest'
             cmdline_hint: 'console=hvc0 earlycon=sbi'
           - arch: loong64
-            src: 'deb:https://deb.debian.org/debian/pool/main/l/linux/linux-binary-7.0.12+deb14-loong64_7.0.12-1_loong64.deb'
             ttl_dst: 'ttl.sh/cloudboot-vmlinuz-loong64:24h'
             ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-loong64:latest'
             cmdline_hint: 'console=ttyS0,115200'
-          # M8.13 (2026-06-10): unify arm64 + amd64 on Debian 13.
-          # signed source pool: linux-signed-<arch> ships the
-          # `/boot/vmlinuz-*` EFI-stub binary the loader expects;
-          # unsigned `linux-image-*-unsigned` is a kbuild template
-          # without the actual vmlinuz, hence the -signed- choice.
           - arch: arm64
-            src: 'deb:https://deb.debian.org/debian/pool/main/l/linux-signed-arm64/linux-image-6.12.90+deb13.1-arm64_6.12.90-2_arm64.deb'
             ttl_dst: 'ttl.sh/cloudboot-vmlinuz-arm64:24h'
             ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-arm64:latest'
             cmdline_hint: 'console=ttyAMA0,115200 earlycon=pl011,mmio32,0x9000000'
           - arch: amd64
-            src: 'deb:https://deb.debian.org/debian/pool/main/l/linux-signed-amd64/linux-image-6.12.90+deb13.1-amd64_6.12.90-2_amd64.deb'
             ttl_dst: 'ttl.sh/cloudboot-vmlinuz-amd64:24h'
             ghcr_dst: 'ghcr.io/cloud-boot/vmlinuz-amd64:latest'
             cmdline_hint: 'console=ttyS0,115200 earlyprintk=ttyS0,115200'
@@ -104,13 +103,78 @@ jobs:
             ./cmd/cloudboot-oci-extract/
           /tmp/cloudboot-oci-extract -h || true
 
+      - name: Resolve latest kernel .deb (${{ matrix.arch }})
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          # Durable, self-healing replacement for the old hard-pinned
+          # `.deb` URLs. We resolve the newest kernel image .deb for
+          # this arch straight from Debian's canonical binary `Packages`
+          # index, so we never name a version that the archive can later
+          # drop (which is what produced the daily HTTP-404 failures).
+          #
+          # Suite = `sid` (unstable): the rolling suite always carries
+          # the newest kernel for every Debian release architecture and
+          # is never frozen or removed, so its index never 404s.
+          #
+          # Package selection mirrors the previous hand-pinned choice
+          # exactly: the plain, versioned `linux-image-<ver>-<arch>`
+          # binary. For arm64/amd64 that binary is built from
+          # `src:linux-signed-<arch>` and its `Filename:` points at the
+          # signed pool that ships the real `/boot/vmlinuz-*` EFI-stub
+          # (the unsigned `-unsigned` template has no vmlinuz). For
+          # riscv64/loong64 there is no signed variant, so it is the
+          # `src:linux` binary under `pool/main/l/linux/`. We exclude the
+          # -dbg / -cloud / -rt / -16k / -unsigned variants and any
+          # experimental `~rc`/`~exp` version, then pick the highest
+          # version with `dpkg --compare-versions`.
+          BASE="https://deb.debian.org/debian"
+          IDX="$BASE/dists/sid/main/binary-${ARCH}/Packages.gz"
+          echo "resolving newest linux-image for ${ARCH} from ${IDX}"
+
+          mapfile -t cands < <(curl -fsSL --retry 5 --retry-delay 3 "$IDX" \
+            | gzip -dc \
+            | awk -v arch="$ARCH" '
+                /^Package: /  { pkg=$2 }
+                /^Version: /  { ver=$2 }
+                /^Filename: / { fn=$2 }
+                /^$/ {
+                  if (pkg ~ ("^linux-image-[0-9].*-" arch "$") &&
+                      pkg !~ /-(dbg|cloud|rt|16k|unsigned)(-|$)/ &&
+                      ver !~ /~/) {
+                    print ver "\t" fn
+                  }
+                  pkg=""; ver=""; fn=""
+                }')
+          if [ "${#cands[@]}" -eq 0 ]; then
+            echo "::error::no linux-image candidate found for ${ARCH} in sid" >&2
+            exit 1
+          fi
+
+          bestver=""; bestfn=""
+          for line in "${cands[@]}"; do
+            v="${line%%$'\t'*}"; f="${line#*$'\t'}"
+            if [ -z "$bestver" ] || dpkg --compare-versions "$v" gt "$bestver"; then
+              bestver="$v"; bestfn="$f"
+            fi
+          done
+
+          URL="$BASE/$bestfn"
+          echo "resolved ${ARCH} -> ${bestver}"
+          echo "resolved URL -> ${URL}"
+          # Fail loudly here (not deep in the extractor) if the archive
+          # is not actually serving the resolved artifact.
+          curl -fsSL --retry 5 --retry-delay 3 -o /dev/null -I "$URL"
+          echo "SRC=deb:${URL}" >> "$GITHUB_ENV"
+
       - name: Republish ${{ matrix.arch }} (ttl.sh primary, ghcr.io if GHCR_TOKEN set)
         env:
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           set -euo pipefail
           ARGS=(
-            -src "${{ matrix.src }}"
+            -src "${SRC}"
             -arch "${{ matrix.arch }}"
             -dst "${{ matrix.ttl_dst }}"
             -cmdline-hint "${{ matrix.cmdline_hint }}"
