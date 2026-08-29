@@ -26,6 +26,8 @@ github.com/go-tpm2/efitcg2 v0.2.0 h1:cfGEXybx2Y0f8awn9Z062lIuLB68BxS1W8yZXX9V/RE
 github.com/go-tpm2/efitcg2 v0.2.0/go.mod h1:5hOsxSZG8tElD5fx7T/ZhyVtXe5pKk0emZY9IlZw0uk=
 github.com/go-tpm2/tpm2 v0.5.0 h1:BrcTd4W2YoJb74+058HbZ9YFB+HtwDHCK8GX4qv5AxQ=
 github.com/go-tpm2/tpm2 v0.5.0/go.mod h1:ovPqrMNpQ2cBxLTb7XOoOaFr40wPYutTQgQvv8ko4Gk=
+github.com/go-tpm2/tpm2 v0.6.0 h1:nj2Y0lQ/E4arJE5u61sZf2hBnKLeMO+xiCIBSG341y0=
+github.com/go-tpm2/tpm2 v0.6.0/go.mod h1:ovPqrMNpQ2cBxLTb7XOoOaFr40wPYutTQgQvv8ko4Gk=
 github.com/go-virtio/common v0.1.6 h1:kDJxwE1KDkWYsSNAUrFptBZvuzIgKB/FzlqG+mwkkgY=
 github.com/go-virtio/common v0.1.6/go.mod h1:tllXVerGT1TquYzy5o1K5UyAWSd1Ap/Z68f9zzJKrLQ=
 github.com/go-virtio/console v0.1.0 h1:3rqoYX4TFThVtkKLejrrhM0ALL8AGTiG2sLGd/VQmNY=
