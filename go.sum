@@ -36,6 +36,8 @@ github.com/go-virtio/input v0.0.0-20260703061803-fcefa3cccace h1:WzxutM0FlLZRl15
 github.com/go-virtio/input v0.0.0-20260703061803-fcefa3cccace/go.mod h1:lKmStOBD9YduIrWOa+MyT3+9SRYZIy1OxsFVogBuN7w=
 github.com/go-virtio/net v0.1.0 h1:kLGRBwK/X3KJ5WV9f/2AksGnDuGtVBSnpzdgxSKuSIc=
 github.com/go-virtio/net v0.1.0/go.mod h1:fGTlgsrafoGqDZsQ4/Pv2IMWEhoPnJUEtoxIlRsTLBU=
+github.com/go-virtio/net v0.1.1 h1:u5puVX8rQLcEF2WovE79wqxbAnGcT54Hohoiscm4M1Q=
+github.com/go-virtio/net v0.1.1/go.mod h1:+z2dELojwkkmTHG136cGQ+TLK6DLjZdQJWjRKa+Jw98=
 github.com/go-virtio/sound v0.0.0-20260806064135-83a1ba3a761d h1:xZC6a67jeiLtfwVsj6qI+htzTv+TqAimWjc149jL6lA=
 github.com/go-virtio/sound v0.0.0-20260806064135-83a1ba3a761d/go.mod h1:O8s5H+gKudxZPHs4sow08M8kMpkJcnrpdLCBhVT3cYA=
 github.com/go-volumes/safeio v0.0.0-20260622072324-7f8eb19f6f8c h1:rOwNQiP0VPnyUcRjiVq9QTOCJkN9heon0325hZdFLaQ=
