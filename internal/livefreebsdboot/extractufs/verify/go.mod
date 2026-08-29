@@ -2,7 +2,7 @@ module github.com/cloud-boot/tamago-uefi/internal/livefreebsdboot/extractufs/ver
 
 go 1.25.0
 
-require github.com/go-filesystems/ufs v0.0.0
+require github.com/go-filesystems/ufs v0.1.0
 
 require github.com/go-filesystems/interface v0.0.0 // indirect
 
