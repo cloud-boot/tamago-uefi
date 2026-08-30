@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runs-on: ubuntu-24.04-arm
+          - arch: amd64
+            runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build
+        run: go build ./...
+
+      # Gated on arm64, reported on amd64. Three tests in uefiboard fail on
+      # amd64 and pass on arm64 -- deterministically, five runs to none, with
+      # GOARCH the only variable -- and that predates this lane by a long way.
+      # See #21. Gating both would make the lane red on arrival and say
+      # nothing about the change under review; skipping amd64 would hide a
+      # real defect. So it runs, and it reports.
+      - name: Test
+        if: matrix.arch == 'arm64'
+        run: go test -count=1 ./...
+
+      - name: Test (amd64, advisory — see #21)
+        if: matrix.arch == 'amd64'
+        continue-on-error: true
+        run: |
+          if ! go test -count=1 ./...; then
+            echo "::warning::amd64 test failures — expected while #21 is open"
+          fi
+
+      - name: go mod tidy leaves no diff
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      # Reported, not gated: 44 files in the tree would be rewritten, which
+      # long predates this lane and deserves its own change.
+      - name: gofmt (advisory)
+        continue-on-error: true
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::warning::$(echo "$unformatted" | wc -l | tr -d ' ') files are not gofmt-clean"
+            echo "$unformatted"
+          fi
