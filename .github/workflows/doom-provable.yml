@@ -65,7 +65,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
           cache: false
 
       - name: Resolve WAD
@@ -170,7 +170,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: '1.26.x'
+          go-version: '1.27.x'
 
       - name: go test seed + frontend + audiolog + harvest
         run: |
