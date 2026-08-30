@@ -18,8 +18,6 @@ github.com/go-simd/matchlen v0.3.1 h1:HKyOis1LaXPGEr8esAj8wkOhrjK7W24P7RlMYbTHyk
 github.com/go-simd/matchlen v0.3.1/go.mod h1:h95M7Ih4MZqO1+Dir0S+joy170I4NrPYaqQFInebWzo=
 github.com/go-test/deep v1.0.3 h1:ZrJSEWsXzPOxaZnFteGEfooLba+ju3FYIbOrS+rQd68=
 github.com/go-test/deep v1.0.3/go.mod h1:wGDj63lr65AM2AQyKZd/NYHGb0R+1RLqB8NKt3aSFNA=
-github.com/go-tpm2/attest v0.2.2 h1:0cOOsSo7VZMjpNGCtxymy0Nt5b6FkCqHqJl+z7o6Ao4=
-github.com/go-tpm2/attest v0.2.2/go.mod h1:jTzQY5bvejQo+suOVtMg6On1hMGQUK4xgbMAgCboTr0=
 github.com/go-tpm2/attest v0.3.0 h1:0Fv441TL02P65BZyLklu384yhNsmuXhgw5nPd9Z+bYA=
 github.com/go-tpm2/attest v0.3.0/go.mod h1:jTzQY5bvejQo+suOVtMg6On1hMGQUK4xgbMAgCboTr0=
 github.com/go-tpm2/common v0.1.0 h1:VVxswlksVMyCKE9Ra0k1m8l22YSmCk2je8KGiwtY9bs=
