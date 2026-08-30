@@ -14,7 +14,7 @@ require (
 	github.com/go-virtio/console v0.1.0
 	github.com/go-virtio/gpu v0.6.1
 	github.com/go-virtio/input v0.0.0-20260703061803-fcefa3cccace
-	github.com/go-virtio/net v0.1.0
+	github.com/go-virtio/net v0.1.1
 	github.com/go-virtio/sound v0.0.0-20260806064135-83a1ba3a761d
 	github.com/hashicorp/hcl/v2 v2.24.0
 	github.com/opencontainers/go-digest v1.0.0
