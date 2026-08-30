@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GOWORK: "off"
+
+jobs:
+  build:
+    name: build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -count=1 ./...
+
+      # Not gated, only reported. The tree carries 44 files gofmt would
+      # rewrite and `go vet` objects to the arm64 assembly trampolines in
+      # uefiboard, both of which predate this lane by a long way. Gating on
+      # either would make the lane red on arrival and tell a reader nothing
+      # about the change in front of them. Reported so the debt is visible
+      # and can be paid deliberately.
+      - name: gofmt (advisory)
+        continue-on-error: true
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::warning::$(echo "$unformatted" | wc -l | tr -d ' ') files are not gofmt-clean"
+            echo "$unformatted"
+          fi
+
+      - name: go mod tidy leaves no diff
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
