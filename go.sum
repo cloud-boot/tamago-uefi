@@ -12,8 +12,8 @@ github.com/go-doom/engine v0.0.0-20260727151530-6a751c5ea9da h1:1aXs0CLKCB2PlXPv
 github.com/go-doom/engine v0.0.0-20260727151530-6a751c5ea9da/go.mod h1:7Ky14VEb/ai7w3rn6cy5FtN1JHPcDUnIhwfG+3MXSaA=
 github.com/go-filesystems/interface v0.0.0-20260806072947-fad96472e2df h1:ZuNtKDOz4OmDlrw27/sa7KkLj0llzPzCAlUfq0Z7Cpg=
 github.com/go-filesystems/interface v0.0.0-20260806072947-fad96472e2df/go.mod h1:9MDfHNNKg9cW1qBa3hmURQj4jiWIdTo9Xpgdt8ZzvV8=
-github.com/go-filesystems/ufs v0.0.0-20260805212249-dfd241e7745e h1:lkuc+mL1qGXFQPOH9bP+u5GKXX9e7r11PAFsejUJUJE=
-github.com/go-filesystems/ufs v0.0.0-20260805212249-dfd241e7745e/go.mod h1:NA11NCVnh5clspvOY6d0ZxZr268c+cqYCUFdeUZ0lN4=
+github.com/go-filesystems/ufs v0.1.0 h1:Iia9J9/r4Wx3vaqq4KoUOB3Uh/CnZdngI9WoeRTuP5g=
+github.com/go-filesystems/ufs v0.1.0/go.mod h1:NA11NCVnh5clspvOY6d0ZxZr268c+cqYCUFdeUZ0lN4=
 github.com/go-simd/matchlen v0.3.1 h1:HKyOis1LaXPGEr8esAj8wkOhrjK7W24P7RlMYbTHyk4=
 github.com/go-simd/matchlen v0.3.1/go.mod h1:h95M7Ih4MZqO1+Dir0S+joy170I4NrPYaqQFInebWzo=
 github.com/go-test/deep v1.0.3 h1:ZrJSEWsXzPOxaZnFteGEfooLba+ju3FYIbOrS+rQd68=

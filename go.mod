@@ -6,7 +6,7 @@ require (
 	github.com/go-compressions/lz4 v0.1.1
 	github.com/go-compressions/lzfse v0.3.0
 	github.com/go-filesystems/interface v0.0.0-20260806072947-fad96472e2df
-	github.com/go-filesystems/ufs v0.0.0-20260805212249-dfd241e7745e
+	github.com/go-filesystems/ufs v0.1.0
 	github.com/go-tpm2/common v0.1.0
 	github.com/go-tpm2/efitcg2 v0.2.0
 	github.com/go-tpm2/tpm2 v0.5.0
