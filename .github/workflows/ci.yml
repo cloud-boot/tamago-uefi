@@ -57,6 +57,20 @@ jobs:
             echo "::warning::amd64 test failures — expected while #21 is open"
           fi
 
+      # ⛔ The defect this guards was invisible at -count=1 and deterministic
+      # at -count=5: a uintptr taken from a test's LOCAL, written through by a
+      # Go callee that can grow — and therefore copy — the goroutine stack.
+      # Whether it bites depends on the frame layout, so adding a log line or
+      # an unrelated test function moved it. arm64 caught it on 2026-09-23 and
+      # amd64 never did.
+      #
+      # Repetition is the only thing that makes such a bug reproducible, and
+      # it costs half a second here. It is not `-race` and not a fuzz run; it
+      # is the same suite, again.
+      - name: Test again, because layout-dependent bugs hide at -count=1
+        if: matrix.arch == 'arm64'
+        run: go test -count=20 ./uefiboard/
+
       - name: go mod tidy leaves no diff
         run: |
           go mod tidy
