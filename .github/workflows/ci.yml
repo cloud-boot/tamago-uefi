@@ -57,6 +57,37 @@ jobs:
             echo "::warning::amd64 test failures — expected while #21 is open"
           fi
 
+      # ⛔ A guard that checks the PROPERTY, because no cheap repetition
+      # checks the symptom.
+      #
+      # The defect fixed alongside this was a uintptr taken from a test's
+      # LOCAL and written through by a Go callee that can grow -- and so copy
+      # -- the goroutine stack. It is invisible at -count=1 and deterministic
+      # at -count=5 of that ONE test; MEASURED here, `go test -count=20
+      # ./uefiboard/` over the unfixed tree still passes, because running the
+      # whole package changes the frame layout. A repetition guard would have
+      # been indistinguishable from no guard at all, so there is not one.
+      #
+      # What is checkable is the shape. In these tests the out-parameter must
+      # go through addr(pin(&x)): pin assigns the pointer to a package-level
+      # unsafe.Pointer, an escape the compiler cannot analyse away, so the
+      # value is on the heap and its address does not move.
+      #
+      # Only _test.go files. Production hands these uintptrs to firmware
+      # through assembly, where no Go frame grows in between, and that code is
+      # correct as written.
+      - name: no bare uintptr(unsafe.Pointer(&…)) in tests
+        run: |
+          # ⛔ Skip comment lines. The first version of this guard was tripped
+          # by the doc comment in pin_test.go that QUOTES the bad form in order
+          # to explain it -- prose about a pattern is not the pattern, and a
+          # guard that cannot tell them apart punishes the explanation.
+          if bad=$(grep -rn 'uintptr(unsafe\.Pointer(&' --include='*_test.go' . | grep -v ':[0-9]*://'); then
+            echo "::error::a test takes a uintptr from a local; use addr(pin(&x)) -- see uefiboard/pin_test.go"
+            echo "$bad"
+            exit 1
+          fi
+
       - name: go mod tidy leaves no diff
         run: |
           go mod tidy

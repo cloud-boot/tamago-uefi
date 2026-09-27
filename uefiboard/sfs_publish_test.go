@@ -122,9 +122,9 @@ func (f *fakeFS) WriteFile(path string, data []byte, perm os.FileMode) error {
 	return errors.New("read-only")
 }
 func (f *fakeFS) MkDir(path string, perm os.FileMode) error { return errors.New("read-only") }
-func (f *fakeFS) DeleteFile(path string) error             { return errors.New("read-only") }
-func (f *fakeFS) DeleteDir(path string) error              { return errors.New("read-only") }
-func (f *fakeFS) Rename(o, n string) error                 { return errors.New("read-only") }
+func (f *fakeFS) DeleteFile(path string) error              { return errors.New("read-only") }
+func (f *fakeFS) DeleteDir(path string) error               { return errors.New("read-only") }
+func (f *fakeFS) Rename(o, n string) error                  { return errors.New("read-only") }
 
 func joinTestPath(dir, name string) string {
 	if dir == "/" {
@@ -195,7 +195,7 @@ func TestSFSReadUCS2_RoundTrip(t *testing.T) {
 		buf[off+1] = byte(r >> 8)
 		off += 2
 	}
-	got := sfsReadUCS2(uintptr(unsafe.Pointer(&buf[0])))
+	got := sfsReadUCS2(addr(pin(&buf[0])))
 	if got != src {
 		t.Errorf("sfsReadUCS2 = %q, want %q", got, src)
 	}
@@ -310,7 +310,7 @@ func TestSFSOpenVolume(t *testing.T) {
 	fs.addDir("/")
 	sfsThis, rootThis := installSFSTestEntry(t, fs)
 	var outRoot uintptr
-	if got := sfsOpenVolumeGo(sfsThis, uintptr(unsafe.Pointer(&outRoot))); got != sfsEFISuccess {
+	if got := sfsOpenVolumeGo(sfsThis, addr(pin(&outRoot))); got != sfsEFISuccess {
 		t.Fatalf("OpenVolume = 0x%x, want SUCCESS", got)
 	}
 	if outRoot != rootThis {
@@ -320,7 +320,7 @@ func TestSFSOpenVolume(t *testing.T) {
 
 func TestSFSOpenVolume_Unknown(t *testing.T) {
 	var outRoot uintptr
-	if got := sfsOpenVolumeGo(0xDEAD, uintptr(unsafe.Pointer(&outRoot))); got != sfsEFINotFound {
+	if got := sfsOpenVolumeGo(0xDEAD, addr(pin(&outRoot))); got != sfsEFINotFound {
 		t.Errorf("OpenVolume(unknown) = 0x%x, want NOT_FOUND", got)
 	}
 }
@@ -336,8 +336,8 @@ func TestSFSFileOpen_FileRead(t *testing.T) {
 	// Open(\boot\loader.conf, READ)
 	name := encodeUCS2("\\boot\\loader.conf")
 	var fh uintptr
-	rc := sfsFileOpenGo(rootThis, uintptr(unsafe.Pointer(&fh)),
-		uintptr(unsafe.Pointer(&name[0])), uintptr(sfsFileModeRead), 0)
+	rc := sfsFileOpenGo(rootThis, addr(pin(&fh)),
+		addr(pin(&name[0])), uintptr(sfsFileModeRead), 0)
 	if rc != sfsEFISuccess {
 		t.Fatalf("Open = 0x%x", rc)
 	}
@@ -348,7 +348,7 @@ func TestSFSFileOpen_FileRead(t *testing.T) {
 	// Read in 8-byte chunks.
 	buf := make([]byte, 8)
 	var sz uint64 = uint64(len(buf))
-	rc = sfsFileReadGo(fh, uintptr(unsafe.Pointer(&sz)), uintptr(unsafe.Pointer(&buf[0])))
+	rc = sfsFileReadGo(fh, addr(pin(&sz)), addr(pin(&buf[0])))
 	if rc != sfsEFISuccess {
 		t.Fatalf("Read = 0x%x", rc)
 	}
@@ -361,7 +361,7 @@ func TestSFSFileOpen_FileRead(t *testing.T) {
 
 	// Second read consumes the rest.
 	sz = uint64(len(buf))
-	rc = sfsFileReadGo(fh, uintptr(unsafe.Pointer(&sz)), uintptr(unsafe.Pointer(&buf[0])))
+	rc = sfsFileReadGo(fh, addr(pin(&sz)), addr(pin(&buf[0])))
 	if rc != sfsEFISuccess {
 		t.Fatalf("second Read = 0x%x", rc)
 	}
@@ -374,7 +374,7 @@ func TestSFSFileOpen_FileRead(t *testing.T) {
 
 	// Third read -> EOF.
 	sz = uint64(len(buf))
-	rc = sfsFileReadGo(fh, uintptr(unsafe.Pointer(&sz)), uintptr(unsafe.Pointer(&buf[0])))
+	rc = sfsFileReadGo(fh, addr(pin(&sz)), addr(pin(&buf[0])))
 	if rc != sfsEFISuccess || sz != 0 {
 		t.Errorf("EOF Read rc=0x%x size=%d, want SUCCESS size=0", rc, sz)
 	}
@@ -391,8 +391,8 @@ func TestSFSFileOpen_NotFound(t *testing.T) {
 	_, rootThis := installSFSTestEntry(t, fs)
 	name := encodeUCS2("\\does\\not\\exist")
 	var fh uintptr
-	rc := sfsFileOpenGo(rootThis, uintptr(unsafe.Pointer(&fh)),
-		uintptr(unsafe.Pointer(&name[0])), uintptr(sfsFileModeRead), 0)
+	rc := sfsFileOpenGo(rootThis, addr(pin(&fh)),
+		addr(pin(&name[0])), uintptr(sfsFileModeRead), 0)
 	if rc != sfsEFINotFound {
 		t.Errorf("Open(missing) = 0x%x, want NOT_FOUND", rc)
 	}
@@ -404,8 +404,8 @@ func TestSFSFileOpen_WriteRejected(t *testing.T) {
 	_, rootThis := installSFSTestEntry(t, fs)
 	name := encodeUCS2("\\foo")
 	var fh uintptr
-	rc := sfsFileOpenGo(rootThis, uintptr(unsafe.Pointer(&fh)),
-		uintptr(unsafe.Pointer(&name[0])), uintptr(sfsFileModeRead|sfsFileModeWrite), 0)
+	rc := sfsFileOpenGo(rootThis, addr(pin(&fh)),
+		addr(pin(&name[0])), uintptr(sfsFileModeRead|sfsFileModeWrite), 0)
 	if rc != sfsEFIWriteProtected {
 		t.Errorf("Open(WRITE) = 0x%x, want WRITE_PROTECTED", rc)
 	}
@@ -417,7 +417,7 @@ func TestSFSFileWrite_AlwaysProtected(t *testing.T) {
 	_, rootThis := installSFSTestEntry(t, fs)
 	var sz uint64 = 4
 	buf := []byte("test")
-	rc := sfsFileWriteGo(rootThis, uintptr(unsafe.Pointer(&sz)), uintptr(unsafe.Pointer(&buf[0])))
+	rc := sfsFileWriteGo(rootThis, addr(pin(&sz)), addr(pin(&buf[0])))
 	if rc != sfsEFIWriteProtected {
 		t.Errorf("Write = 0x%x, want WRITE_PROTECTED", rc)
 	}
@@ -428,7 +428,7 @@ func TestSFSFileSetInfo_AlwaysProtected(t *testing.T) {
 	fs.addDir("/")
 	_, rootThis := installSFSTestEntry(t, fs)
 	g := EFIFileInfoGUID
-	rc := sfsFileSetInfoGo(rootThis, uintptr(unsafe.Pointer(&g)), 0, 0)
+	rc := sfsFileSetInfoGo(rootThis, addr(pin(&g)), 0, 0)
 	if rc != sfsEFIWriteProtected {
 		t.Errorf("SetInfo = 0x%x, want WRITE_PROTECTED", rc)
 	}
@@ -460,15 +460,15 @@ func TestSFSFileSetGetPosition(t *testing.T) {
 	_, rootThis := installSFSTestEntry(t, fs)
 	name := encodeUCS2("/boot/loader.conf")
 	var fh uintptr
-	if rc := sfsFileOpenGo(rootThis, uintptr(unsafe.Pointer(&fh)),
-		uintptr(unsafe.Pointer(&name[0])), uintptr(sfsFileModeRead), 0); rc != sfsEFISuccess {
+	if rc := sfsFileOpenGo(rootThis, addr(pin(&fh)),
+		addr(pin(&name[0])), uintptr(sfsFileModeRead), 0); rc != sfsEFISuccess {
 		t.Fatalf("Open = 0x%x", rc)
 	}
 	if rc := sfsFileSetPositionGo(fh, 3); rc != sfsEFISuccess {
 		t.Errorf("SetPosition(3) = 0x%x", rc)
 	}
 	var pos uint64
-	if rc := sfsFileGetPositionGo(fh, uintptr(unsafe.Pointer(&pos))); rc != sfsEFISuccess {
+	if rc := sfsFileGetPositionGo(fh, addr(pin(&pos))); rc != sfsEFISuccess {
 		t.Errorf("GetPosition = 0x%x", rc)
 	}
 	if pos != 3 {
@@ -478,7 +478,7 @@ func TestSFSFileSetGetPosition(t *testing.T) {
 	if rc := sfsFileSetPositionGo(fh, uintptr(sfsPositionEnd)); rc != sfsEFISuccess {
 		t.Errorf("SetPosition(EOF) = 0x%x", rc)
 	}
-	if rc := sfsFileGetPositionGo(fh, uintptr(unsafe.Pointer(&pos))); rc != sfsEFISuccess {
+	if rc := sfsFileGetPositionGo(fh, addr(pin(&pos))); rc != sfsEFISuccess {
 		t.Errorf("GetPosition(after EOF seek) = 0x%x", rc)
 	}
 	if pos != 5 {
@@ -493,14 +493,14 @@ func TestSFSFileGetInfo_FileInfo(t *testing.T) {
 	_, rootThis := installSFSTestEntry(t, fs)
 	name := encodeUCS2("/loader.conf")
 	var fh uintptr
-	if rc := sfsFileOpenGo(rootThis, uintptr(unsafe.Pointer(&fh)),
-		uintptr(unsafe.Pointer(&name[0])), uintptr(sfsFileModeRead), 0); rc != sfsEFISuccess {
+	if rc := sfsFileOpenGo(rootThis, addr(pin(&fh)),
+		addr(pin(&name[0])), uintptr(sfsFileModeRead), 0); rc != sfsEFISuccess {
 		t.Fatalf("Open = 0x%x", rc)
 	}
 	// Query buffer size first.
 	g := EFIFileInfoGUID
 	var sz uint64
-	rc := sfsFileGetInfoGo(fh, uintptr(unsafe.Pointer(&g)), uintptr(unsafe.Pointer(&sz)), 0)
+	rc := sfsFileGetInfoGo(fh, addr(pin(&g)), addr(pin(&sz)), 0)
 	if rc != sfsEFIBufferTooSmall {
 		t.Fatalf("GetInfo(0) = 0x%x, want BUFFER_TOO_SMALL", rc)
 	}
@@ -508,8 +508,8 @@ func TestSFSFileGetInfo_FileInfo(t *testing.T) {
 		t.Fatal("GetInfo did not set required size")
 	}
 	buf := make([]byte, sz)
-	rc = sfsFileGetInfoGo(fh, uintptr(unsafe.Pointer(&g)),
-		uintptr(unsafe.Pointer(&sz)), uintptr(unsafe.Pointer(&buf[0])))
+	rc = sfsFileGetInfoGo(fh, addr(pin(&g)),
+		addr(pin(&sz)), addr(pin(&buf[0])))
 	if rc != sfsEFISuccess {
 		t.Fatalf("GetInfo = 0x%x", rc)
 	}
@@ -527,8 +527,8 @@ func TestSFSFileGetInfo_UnsupportedGUID(t *testing.T) {
 	g := EFIBlockIOProtocolGUID
 	var sz uint64 = 1024
 	buf := make([]byte, sz)
-	rc := sfsFileGetInfoGo(rootThis, uintptr(unsafe.Pointer(&g)),
-		uintptr(unsafe.Pointer(&sz)), uintptr(unsafe.Pointer(&buf[0])))
+	rc := sfsFileGetInfoGo(rootThis, addr(pin(&g)),
+		addr(pin(&sz)), addr(pin(&buf[0])))
 	if rc != sfsEFIUnsupported {
 		t.Errorf("GetInfo(wrong GUID) = 0x%x, want UNSUPPORTED", rc)
 	}
@@ -545,8 +545,8 @@ func TestSFSFileRead_Directory(t *testing.T) {
 	// Open /boot
 	name := encodeUCS2("/boot")
 	var fh uintptr
-	if rc := sfsFileOpenGo(rootThis, uintptr(unsafe.Pointer(&fh)),
-		uintptr(unsafe.Pointer(&name[0])), uintptr(sfsFileModeRead), 0); rc != sfsEFISuccess {
+	if rc := sfsFileOpenGo(rootThis, addr(pin(&fh)),
+		addr(pin(&name[0])), uintptr(sfsFileModeRead), 0); rc != sfsEFISuccess {
 		t.Fatalf("Open(/boot) = 0x%x", rc)
 	}
 
@@ -562,7 +562,7 @@ func TestSFSFileRead_Directory(t *testing.T) {
 	// Third iteration — exhausted, size=0.
 	buf := make([]byte, 256)
 	var sz uint64 = uint64(len(buf))
-	if rc := sfsFileReadGo(fh, uintptr(unsafe.Pointer(&sz)), uintptr(unsafe.Pointer(&buf[0]))); rc != sfsEFISuccess {
+	if rc := sfsFileReadGo(fh, addr(pin(&sz)), addr(pin(&buf[0]))); rc != sfsEFISuccess {
 		t.Fatalf("exhausted Read rc=0x%x", rc)
 	}
 	if sz != 0 {
@@ -576,7 +576,7 @@ func readNextDirent(t *testing.T, fh uintptr) string {
 	t.Helper()
 	buf := make([]byte, 512)
 	var sz uint64 = uint64(len(buf))
-	rc := sfsFileReadGo(fh, uintptr(unsafe.Pointer(&sz)), uintptr(unsafe.Pointer(&buf[0])))
+	rc := sfsFileReadGo(fh, addr(pin(&sz)), addr(pin(&buf[0])))
 	if rc != sfsEFISuccess {
 		t.Fatalf("Read(dir) rc=0x%x", rc)
 	}
