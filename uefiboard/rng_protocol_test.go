@@ -65,7 +65,7 @@ func TestRngGetRNGGo_NotRegistered(t *testing.T) {
 	resetRNGRegistry()
 	buf := make([]byte, 16)
 	this := uintptr(0xdeadbeef) // not in the registry
-	st := rngGetRNGGo(this, 0, 16, uintptr(unsafe.Pointer(&buf[0])))
+	st := rngGetRNGGo(this, 0, 16, addr(pin(&buf[0])))
 	if st != rngEFINotFound {
 		t.Errorf("expected EFI_NOT_FOUND on unregistered this, got %#x", st)
 	}
@@ -78,7 +78,7 @@ func TestRngGetRNGGo_Success(t *testing.T) {
 	rngRegistry[0] = rngEntry{proto: this}
 
 	buf := make([]byte, 16)
-	st := rngGetRNGGo(this, 0, 16, uintptr(unsafe.Pointer(&buf[0])))
+	st := rngGetRNGGo(this, 0, 16, addr(pin(&buf[0])))
 	if st != rngEFISuccess {
 		t.Fatalf("expected EFI_SUCCESS, got %#x", st)
 	}
@@ -102,7 +102,7 @@ func TestRngGetRNGGo_NilEntropy(t *testing.T) {
 	defer func() { rngEntropy = saved }()
 
 	buf := make([]byte, 4)
-	st := rngGetRNGGo(this, 0, 4, uintptr(unsafe.Pointer(&buf[0])))
+	st := rngGetRNGGo(this, 0, 4, addr(pin(&buf[0])))
 	if st != rngEFIDeviceError {
 		t.Errorf("expected EFI_DEVICE_ERROR when entropy is nil, got %#x", st)
 	}
@@ -124,7 +124,7 @@ func TestRngGetRNGGo_ShortRead(t *testing.T) {
 	defer func() { rngEntropy = saved }()
 
 	buf := make([]byte, 16)
-	st := rngGetRNGGo(this, 0, 16, uintptr(unsafe.Pointer(&buf[0])))
+	st := rngGetRNGGo(this, 0, 16, addr(pin(&buf[0])))
 	if st != rngEFIDeviceError {
 		t.Errorf("expected EFI_DEVICE_ERROR on short read, got %#x", st)
 	}
@@ -137,7 +137,7 @@ func TestRngGetInfoGo_SizeQuery(t *testing.T) {
 
 	// Size-query: listSize = 0, listPtr NULL.
 	var size uintptr = 0
-	st := rngGetInfoGo(this, uintptr(unsafe.Pointer(&size)), 0)
+	st := rngGetInfoGo(this, addr(pin(&size)), 0)
 	const wantStatus uintptr = 0x8000000000000005 // EFI_BUFFER_TOO_SMALL
 	if st != wantStatus {
 		t.Errorf("expected EFI_BUFFER_TOO_SMALL, got %#x", st)
@@ -154,8 +154,8 @@ func TestRngGetInfoGo_Success(t *testing.T) {
 
 	buf := make([]byte, 16)
 	var size uintptr = 16
-	st := rngGetInfoGo(this, uintptr(unsafe.Pointer(&size)),
-		uintptr(unsafe.Pointer(&buf[0])))
+	st := rngGetInfoGo(this, addr(pin(&size)),
+		addr(pin(&buf[0])))
 	if st != rngEFISuccess {
 		t.Fatalf("expected EFI_SUCCESS, got %#x", st)
 	}
@@ -181,8 +181,8 @@ func TestRngGetInfoGo_NotRegistered(t *testing.T) {
 	resetRNGRegistry()
 	buf := make([]byte, 16)
 	var size uintptr = 16
-	st := rngGetInfoGo(0xdeadbeef, uintptr(unsafe.Pointer(&size)),
-		uintptr(unsafe.Pointer(&buf[0])))
+	st := rngGetInfoGo(0xdeadbeef, addr(pin(&size)),
+		addr(pin(&buf[0])))
 	if st != rngEFINotFound {
 		t.Errorf("expected EFI_NOT_FOUND on unregistered this, got %#x", st)
 	}

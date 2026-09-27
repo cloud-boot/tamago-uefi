@@ -14,7 +14,6 @@ package uefiboard
 
 import (
 	"testing"
-	"unsafe"
 )
 
 // TestEFISimpleFileSystemProtocolGUID_RoundTrip pins the SFS GUID we
@@ -70,7 +69,7 @@ func blockIOInstallTestEntry(t *testing.T, body []byte) uintptr {
 	}
 	blockIOPublishRegistry[slot] = blockIOPublishEntry{
 		proto:         fakeProto,
-		body:          uintptr(unsafe.Pointer(&body[0])),
+		body:          addr(pin(&body[0])),
 		size:          uintptr(len(body)),
 		bodyKeepAlive: body,
 	}
@@ -118,7 +117,7 @@ func TestBlockIOWriteBlocksGo_AlwaysWriteProtected(t *testing.T) {
 	body := make([]byte, 512)
 	this := blockIOInstallTestEntry(t, body)
 	dst := make([]byte, 512)
-	if got := blockIOWriteBlocksGo(this, 1, 0, 512, uintptr(unsafe.Pointer(&dst[0]))); got != blockIOEFIWriteProtected {
+	if got := blockIOWriteBlocksGo(this, 1, 0, 512, addr(pin(&dst[0]))); got != blockIOEFIWriteProtected {
 		t.Errorf("blockIOWriteBlocksGo(known, in-bounds) = 0x%x, want EFI_WRITE_PROTECTED (0x%x)",
 			got, blockIOEFIWriteProtected)
 	}
@@ -129,7 +128,7 @@ func TestBlockIOWriteBlocksGo_AlwaysWriteProtected(t *testing.T) {
 // confused with a "live but read-only" device.
 func TestBlockIOWriteBlocksGo_UnknownThisReturnsNotFound(t *testing.T) {
 	dst := make([]byte, 512)
-	if got := blockIOWriteBlocksGo(0xDEADDEAD, 1, 0, 512, uintptr(unsafe.Pointer(&dst[0]))); got != blockIOEFINotFound {
+	if got := blockIOWriteBlocksGo(0xDEADDEAD, 1, 0, 512, addr(pin(&dst[0]))); got != blockIOEFINotFound {
 		t.Errorf("blockIOWriteBlocksGo(unknown) = 0x%x, want EFI_NOT_FOUND", got)
 	}
 }
@@ -149,7 +148,7 @@ func TestBlockIOReadBlocksGo_RoundTrip(t *testing.T) {
 
 	// Read block 2 (512 bytes starting at offset 1024).
 	dst := make([]byte, BlockIOLogicalBlockSize)
-	got := blockIOReadBlocksGo(this, 1, 2, uintptr(BlockIOLogicalBlockSize), uintptr(unsafe.Pointer(&dst[0])))
+	got := blockIOReadBlocksGo(this, 1, 2, uintptr(BlockIOLogicalBlockSize), addr(pin(&dst[0])))
 	if got != blockIOEFISuccess {
 		t.Fatalf("blockIOReadBlocksGo = 0x%x, want EFI_SUCCESS", got)
 	}
@@ -175,7 +174,7 @@ func TestBlockIOReadBlocksGo_BadBufferSize(t *testing.T) {
 	body := make([]byte, 1024)
 	this := blockIOInstallTestEntry(t, body)
 	dst := make([]byte, 300)
-	got := blockIOReadBlocksGo(this, 1, 0, 300, uintptr(unsafe.Pointer(&dst[0])))
+	got := blockIOReadBlocksGo(this, 1, 0, 300, addr(pin(&dst[0])))
 	if got != blockIOEFIBadBufferSize {
 		t.Errorf("blockIOReadBlocksGo(size=300) = 0x%x, want EFI_BAD_BUFFER_SIZE (0x%x)",
 			got, blockIOEFIBadBufferSize)
@@ -201,7 +200,7 @@ func TestBlockIOReadBlocksGo_OutOfRangeLBA(t *testing.T) {
 	dst := make([]byte, BlockIOLogicalBlockSize)
 	// Reading block 2 at offset 1024 starts AT end-of-image; the +size
 	// extends past, so end > size → EFI_INVALID_PARAMETER.
-	got := blockIOReadBlocksGo(this, 1, 2, uintptr(BlockIOLogicalBlockSize), uintptr(unsafe.Pointer(&dst[0])))
+	got := blockIOReadBlocksGo(this, 1, 2, uintptr(BlockIOLogicalBlockSize), addr(pin(&dst[0])))
 	if got != blockIOEFIInvalidParameter {
 		t.Errorf("blockIOReadBlocksGo(lba=past-end) = 0x%x, want EFI_INVALID_PARAMETER", got)
 	}
@@ -210,7 +209,7 @@ func TestBlockIOReadBlocksGo_OutOfRangeLBA(t *testing.T) {
 // TestBlockIOReadBlocksGo_UnknownThisReturnsNotFound.
 func TestBlockIOReadBlocksGo_UnknownThisReturnsNotFound(t *testing.T) {
 	dst := make([]byte, 512)
-	got := blockIOReadBlocksGo(0xDEADBABE, 1, 0, 512, uintptr(unsafe.Pointer(&dst[0])))
+	got := blockIOReadBlocksGo(0xDEADBABE, 1, 0, 512, addr(pin(&dst[0])))
 	if got != blockIOEFINotFound {
 		t.Errorf("blockIOReadBlocksGo(unknown) = 0x%x, want EFI_NOT_FOUND", got)
 	}
