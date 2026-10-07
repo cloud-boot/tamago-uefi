@@ -81,7 +81,7 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MRS	SCTLR_EL1, R3
 	BIC	$1<<1, R3	// A: alignment check
 	MSR	R3, SCTLR_EL1
-	WORD	$0xd5033fdf	// isb sy (Go arm64 asm rejects "ISB SY" without arm64.h macros)
+	ISB	$15	// isb sy (SY is option 0b1111)
 
 	// Enable FP/SIMD access at EL0/EL1 via CPACR_EL1.FPEN = 0b11. Go arm64
 	// codegen uses V/D/S registers throughout; if firmware left FPEN
@@ -89,7 +89,7 @@ TEXT cpuinit(SB),NOSPLIT|NOFRAME,$0
 	MRS	CPACR_EL1, R3
 	ORR	$(3<<20), R3
 	MSR	R3, CPACR_EL1
-	WORD	$0xd5033fdf	// isb sy
+	ISB	$15	// isb sy
 
 	// enter the standard arm64 TamaGo rt0
 	B	_rt0_tamago_start(SB)

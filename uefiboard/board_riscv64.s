@@ -8,11 +8,10 @@
 // because OpenSBI exposes the SBI TIME extension which wires this CSR
 // up to the platform mtime register.
 //
-// Encoded as CSRRS T0, TIME, ZERO via WORD because the Go riscv64
-// assembler has no `TIME` CSR mnemonic.
-//   csrrs t0, time, zero  → 0xc0102_2f3
-//     funct12=0xC01, rs1=0, funct3=010 (CSRRS), rd=5 (T0), opcode=1110011
+// RDTIME is the Go riscv64 assembler's spelling of the Zicntr pseudo-
+// instruction `rdtime t0` = `csrrs t0, time, zero`, encoded 0xc01022f3
+// (funct12=0xC01, rs1=0, funct3=010 (CSRRS), rd=5 (T0), opcode=1110011).
 TEXT ·rdtime(SB),NOSPLIT|NOFRAME,$0-8
-	WORD	$0xc01022f3
+	RDTIME	T0
 	MOV	T0, ret+0(FP)
 	RET

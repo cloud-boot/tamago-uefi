@@ -183,7 +183,7 @@ arch-neutral core plus per-arch entry shims and Go hooks.
 | `cpuinit_riscv64.s` | PE entry (LP64: `A0`=ImageHandle, `A1`=SystemTable), `gBS->AllocatePages` for heap, `SSTATUS.FS=Initial` for FPU, RamStart, hand-off to `_rt0_tamago_start` | riscv64 |
 | `eficall_riscv64.s` | LP64 thunk: `A0..A3` args, no shadow space, indirect `JALR (T1)` | riscv64 |
 | `board_riscv64.go` | self-contained (no framework dep), `Nanotime` via `rdtime` (TIME CSR), `Hwinit0/1` no-ops under UEFI, `RamSize=32 MiB`, `RamStackOffset`, xorshift RNG stubs | riscv64 |
-| `board_riscv64.s` | `rdtime()` via raw `csrrs t0, time, zero` (`WORD $0xc01022f3`) | riscv64 |
+| `board_riscv64.s` | `rdtime()` via `RDTIME` (`csrrs t0, time, zero`) | riscv64 |
 | `cpuinit_loong64.s` | PE entry (LoongArch LP64: `R4`=ImageHandle, `R5`=SystemTable), early `'A'` UART marker, `gBS->AllocatePages` for heap, `csrwr CSR.EUEN.FPE`, RamStart, hand-off to `_rt0_tamago_start` | loong64 |
 | `eficall_loong64.s` | LoongArch LP64 thunk: `R4..R7` args, no shadow space, indirect `JAL (R13)` via `R23`-stashed RA | loong64 |
 | `board_loong64.go` | Self-contained (no framework loong64 import), `Nanotime` via stable-timer + CPUCFG, `Hwinit0/1` (no-op under UEFI), `RamSize=64 MiB`, `RamStackOffset`, splitmix64 RNG seeded from the stable-timer | loong64 |
