@@ -1,12 +1,12 @@
 module github.com/cloud-boot/tamago-uefi
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/go-compressions/lz4 v0.3.0
 	github.com/go-compressions/lzfse v0.5.0
-	github.com/go-doom/engine v0.0.0-20261004234739-5cb17655e4fc
-	github.com/go-filesystems/interface v0.4.0
+	github.com/go-doom/engine v0.0.0-20261007112629-20dfed0ddaae
+	github.com/go-filesystems/interface v0.5.0
 	github.com/go-filesystems/ufs v0.3.0
 	github.com/go-tpm2/attest v0.5.0
 	github.com/go-tpm2/common v0.3.0
@@ -15,14 +15,14 @@ require (
 	github.com/go-virtio/common v0.3.0
 	github.com/go-virtio/console v0.3.0
 	github.com/go-virtio/gpu v0.8.0
-	github.com/go-virtio/input v0.0.0-20261005012651-e8b43c961bac
+	github.com/go-virtio/input v0.0.0-20261007024331-b1233f0ae9ac
 	github.com/go-virtio/net v0.3.0
-	github.com/go-virtio/sound v0.0.0-20261005012704-6c0957583f06
+	github.com/go-virtio/sound v0.0.0-20261007024420-5918d1adc1b1
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/ulikunitz/xz v0.5.17
-	github.com/usbarmory/tamago v1.27.1
+	github.com/usbarmory/tamago v1.27.2
 	oras.land/oras-go/v2 v2.6.2
 )
 
