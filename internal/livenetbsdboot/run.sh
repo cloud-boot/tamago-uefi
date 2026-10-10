@@ -74,7 +74,7 @@ DEFAULT_IMG_PATHS=(
     "/tmp/netbsd/NetBSD-10.0-amd64-boot.iso"
     "/tmp/netbsd/NetBSD-10.0-amd64.iso"
 )
-NETBSD_BOOT_ISO_URL="${CLOUDBOOT_NETBSD_IMAGE_URL:-https://cdn.netbsd.org/pub/NetBSD/NetBSD-10.0/amd64/installation/cdrom/boot.iso}"
+NETBSD_BOOT_ISO_URL="${CLOUDBOOT_NETBSD_IMAGE_URL:-https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-10.0/amd64/installation/cdrom/boot.iso}"
 SRC_PATH="${CLOUDBOOT_NETBSD_IMAGE:-}"
 if [[ -z "$SRC_PATH" ]]; then
     for cand in "${DEFAULT_IMG_PATHS[@]}"; do
