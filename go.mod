@@ -5,7 +5,7 @@ go 1.27.2
 require (
 	github.com/go-compressions/lz4 v0.3.0
 	github.com/go-compressions/lzfse v0.5.0
-	github.com/go-doom/engine v0.0.0-20261007112629-20dfed0ddaae
+	github.com/go-doom/engine v0.0.0-20261012164332-cc1dc72356b4
 	github.com/go-filesystems/interface v0.5.0
 	github.com/go-filesystems/ufs v0.3.0
 	github.com/go-tpm2/attest v0.5.0
@@ -15,15 +15,15 @@ require (
 	github.com/go-virtio/common v0.3.0
 	github.com/go-virtio/console v0.3.0
 	github.com/go-virtio/gpu v0.8.0
-	github.com/go-virtio/input v0.0.0-20261007024331-b1233f0ae9ac
+	github.com/go-virtio/input v0.0.0-20261011022904-b7b42ed8225f
 	github.com/go-virtio/net v0.3.0
-	github.com/go-virtio/sound v0.0.0-20261007024420-5918d1adc1b1
+	github.com/go-virtio/sound v0.0.0-20261011023255-5ae6c8e16eff
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/ulikunitz/xz v0.5.17
 	github.com/usbarmory/tamago v1.27.2
-	oras.land/oras-go/v2 v2.6.2
+	oras.land/oras-go/v2 v2.6.3
 )
 
 require (
@@ -36,8 +36,8 @@ require (
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
 	github.com/zclconf/go-cty v1.19.0 // indirect
 	golang.org/x/mod v0.37.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/tools v0.47.0 // indirect
 )
