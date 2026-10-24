@@ -23,7 +23,7 @@ require (
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/ulikunitz/xz v0.5.17
 	github.com/usbarmory/tamago v1.27.3
-	oras.land/oras-go/v2 v2.6.4
+	oras.land/oras-go/v2 v2.7.0
 )
 
 require (
