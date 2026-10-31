@@ -12,8 +12,8 @@ github.com/go-compressions/lz4 v0.3.0 h1:u6ts5CKyuyw3ULh3FgRKymwzhtOK+K2MOK7uwFT
 github.com/go-compressions/lz4 v0.3.0/go.mod h1:o2p4iXyDFRLarSi5VwH/Z+3WGyWPUq/0LufT9/dUAew=
 github.com/go-compressions/lzfse v0.5.0 h1:r4eLxuzXc2C0LYlhhVmtEq0c+B31c53jcaa8UKLbMlk=
 github.com/go-compressions/lzfse v0.5.0/go.mod h1:G4+MZUwHkfTSjCfJyRFJzTdNIy0v+JcehyxvWJTGBE4=
-github.com/go-doom/engine v0.0.0-20261025164436-4c52b87c39fa h1:k2q9RIspXizTz1X+rygHXUn7M0DQQj3dADywmg1ywrs=
-github.com/go-doom/engine v0.0.0-20261025164436-4c52b87c39fa/go.mod h1:5TxOTkvJcU9D1TXoEEEQ5A9nRaDrLKTkGNkrmhhafWI=
+github.com/go-doom/engine v0.0.0-20261029194012-f1f884a22575 h1:6m5H2JCsj2VqaQm7uOIvujDCYtlr7Mb4y/R4CjwgxIY=
+github.com/go-doom/engine v0.0.0-20261029194012-f1f884a22575/go.mod h1:5TxOTkvJcU9D1TXoEEEQ5A9nRaDrLKTkGNkrmhhafWI=
 github.com/go-filesystems/interface v0.5.0 h1:AsbSXYG5cp497Ki0Ez88s8wwrVEmeRmFLd40T4d3UwA=
 github.com/go-filesystems/interface v0.5.0/go.mod h1:u9v8mvapNV8djzObwCECdyd2g6JBU6HNTR4EAqxOn6U=
 github.com/go-filesystems/ufs v0.3.0 h1:qCCJCvXneQSTobkeWRGzTHJngjFiwgcj0gG6JbLeZGk=

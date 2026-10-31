@@ -5,7 +5,7 @@ go 1.27.2
 require (
 	github.com/go-compressions/lz4 v0.3.0
 	github.com/go-compressions/lzfse v0.5.0
-	github.com/go-doom/engine v0.0.0-20261025164436-4c52b87c39fa
+	github.com/go-doom/engine v0.0.0-20261029194012-f1f884a22575
 	github.com/go-filesystems/interface v0.5.0
 	github.com/go-filesystems/ufs v0.3.0
 	github.com/go-tpm2/attest v0.5.0
