@@ -1,6 +1,6 @@
 module github.com/cloud-boot/tamago-uefi
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/go-compressions/lz4 v0.3.0
