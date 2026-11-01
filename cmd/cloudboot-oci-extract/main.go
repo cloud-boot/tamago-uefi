@@ -27,7 +27,9 @@
 //
 // Pure Go, no CGO, stdlib only (plus opencontainers/image-spec for
 // the manifest type — already a tamago-uefi dependency — plus
-// github.com/ulikunitz/xz for the .deb data.tar.xz inner archive).
+// github.com/go-compressions/xz for the .deb data.tar.xz inner archive —
+// its window grows with the decoded data, capped at 256 MiB, whatever
+// dictionary size the xz header declares).
 //
 // Sources supported today:
 //
@@ -87,8 +89,21 @@ import (
 	specsgo "github.com/opencontainers/image-spec/specs-go"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
-	"github.com/ulikunitz/xz"
+	"github.com/go-compressions/xz"
 )
+
+// maxXzDictionary bounds the window a .deb data.tar.xz may make the decoder
+// keep: 256 MiB, go-compressions/xz's own default, stated here so the bound is
+// readable at the call site (xz -9 uses 64 MiB). The window grows with the
+// decoded data, never from the dictionary size a header declares, so this caps
+// what real data can ask for and is not an allocation. Data that needs more
+// fails with an error that satisfies errors.Is(err, xz.ErrTooLarge).
+const maxXzDictionary = 256 << 20
+
+// newXzReader is the one place a .deb's xz member is opened.
+func newXzReader(r io.Reader) (*xz.Reader, error) {
+	return xz.ReaderConfig{MaxDictionary: maxXzDictionary}.NewReader(r)
+}
 
 // efistubKernelMediaType: cloud-boot semantic media-type for the
 // single-blob raw-kernel layer (not what the in-tree MODE C loader
@@ -334,7 +349,7 @@ func fetchKernelDeb(url, arch string) ([]byte, string, error) {
 	var tarReader io.Reader
 	switch {
 	case strings.HasSuffix(dataName, ".xz"):
-		xr, err := xz.NewReader(bytes.NewReader(dataBytes))
+		xr, err := newXzReader(bytes.NewReader(dataBytes))
 		if err != nil {
 			return nil, "", fmt.Errorf("xz: %w", err)
 		}

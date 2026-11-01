@@ -446,6 +446,21 @@ Host-side unit tests cover the parser + GUID byte layouts :
 task uefiboard:test
 ```
 
+## What bounds the `.deb` xz member (`cmd/cloudboot-oci-extract`)
+
+`cloudboot-oci-extract` decodes the `data.tar.xz` of a Debian `.deb` with
+[`go-compressions/xz`](https://github.com/go-compressions/xz), not
+`ulikunitz/xz`. The latter allocates the LZMA2 dictionary whole from the block
+header (`DictCap` is a minimum, not a ceiling): a 44-byte `.xz` declaring a
+1.5 GiB dictionary allocated 1,610,663,976 bytes. Here the window grows with
+the decoded data: a stream declaring 1.5 GiB over a few bytes allocates about
+22 KB (`cmd/cloudboot-oci-extract/xzbomb_test.go`, run in CI as a compiled
+binary under `ulimit -v` and `GOMEMLIMIT`). The dictionary a stream may make
+the decoder keep is capped at 256 MiB (`maxXzDictionary`, above the 64 MiB of
+`xz -9`); data that needs more fails with an error that satisfies
+`errors.Is(err, xz.ErrTooLarge)`. `ulikunitz/xz` is no longer a dependency of
+the module.
+
 ## Follow-ups
 
 - Submit the `BaseRiscVMmuLib.c` `~`/`!` assert-typo patch (staged at
