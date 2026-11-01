@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	github.com/go-compressions/lz4 v0.3.0
 	github.com/go-compressions/lzfse v0.5.0
+	github.com/go-compressions/xz v0.1.0
 	github.com/go-doom/engine v0.0.0-20261029194012-f1f884a22575
 	github.com/go-filesystems/interface v0.5.0
 	github.com/go-filesystems/ufs v0.3.0
@@ -21,7 +22,6 @@ require (
 	github.com/hashicorp/hcl/v2 v2.25.0
 	github.com/opencontainers/go-digest v1.0.0
 	github.com/opencontainers/image-spec v1.1.1
-	github.com/ulikunitz/xz v0.5.17
 	github.com/usbarmory/tamago v1.27.3
 	oras.land/oras-go/v2 v2.7.0
 )
