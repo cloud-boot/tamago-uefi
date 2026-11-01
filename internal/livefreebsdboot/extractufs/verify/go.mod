@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/go-filesystems/interface v0.5.0
-	github.com/go-filesystems/ufs v0.3.0
+	github.com/go-filesystems/ufs v0.4.0
 )
 
 // We point at a vendored snapshot of go-filesystems/ufs pinned at
