@@ -3,16 +3,16 @@ module github.com/cloud-boot/tamago-uefi
 go 1.27.3
 
 require (
-	github.com/go-compressions/lz4 v0.4.1
+	github.com/go-compressions/lz4 v0.5.1
 	github.com/go-compressions/lzfse v0.6.0
 	github.com/go-compressions/xz v0.3.1
-	github.com/go-doom/engine v0.0.0-20261110153437-45d95bf5665c
+	github.com/go-doom/engine v0.0.0-20261117165239-4b617e46eb5a
 	github.com/go-filesystems/interface v0.6.0
 	github.com/go-filesystems/ufs v0.5.0
 	github.com/go-tpm2/attest v0.5.0
 	github.com/go-tpm2/common v0.3.0
 	github.com/go-tpm2/efitcg2 v0.4.0
-	github.com/go-tpm2/tpm2 v0.8.0
+	github.com/go-tpm2/tpm2 v0.10.0
 	github.com/go-virtio/common v0.3.0
 	github.com/go-virtio/console v0.3.0
 	github.com/go-virtio/gpu v0.10.0
