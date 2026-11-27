@@ -3,10 +3,10 @@ module github.com/cloud-boot/tamago-uefi
 go 1.27.3
 
 require (
-	github.com/go-compressions/lz4 v0.6.0
+	github.com/go-compressions/lz4 v0.7.0
 	github.com/go-compressions/lzfse v0.6.0
 	github.com/go-compressions/xz v0.3.1
-	github.com/go-doom/engine v0.0.0-20261117165239-4b617e46eb5a
+	github.com/go-doom/engine v0.0.0-20261126174232-8800702df4a0
 	github.com/go-filesystems/interface v0.6.0
 	github.com/go-filesystems/ufs v0.5.0
 	github.com/go-tpm2/attest v0.5.0
